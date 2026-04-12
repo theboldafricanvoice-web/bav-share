@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
-import { notFound } from "next/navigation";
 import { getSharedMessageByToken } from "@/lib/sharedMessages";
+import type { Metadata } from "next";
+import Image from "next/image";
+import { notFound } from "next/navigation";
 
 type PageProps = {
   params: Promise<{
@@ -13,18 +14,26 @@ const siteUrl =
 
 const defaultOgImage = `${siteUrl}/og-default.jpg`;
 
-function getOgImage(sharedMessage: Awaited<ReturnType<typeof getSharedMessageByToken>>) {
+function getOgImage(
+  sharedMessage: Awaited<ReturnType<typeof getSharedMessageByToken>>
+) {
   if (!sharedMessage) return defaultOgImage;
-
-  if (sharedMessage.preview_type === "image" && sharedMessage.thumbnail_url?.trim()) {
-    return sharedMessage.thumbnail_url.trim();
-  }
 
   if (sharedMessage.thumbnail_url?.trim()) {
     return sharedMessage.thumbnail_url.trim();
   }
 
   return defaultOgImage;
+}
+
+function getOgType(
+  sharedMessage: Awaited<ReturnType<typeof getSharedMessageByToken>>
+): "article" | "video.other" {
+  if (sharedMessage?.preview_type === "video") {
+    return "video.other";
+  }
+
+  return "article";
 }
 
 export async function generateMetadata({
@@ -35,7 +44,7 @@ export async function generateMetadata({
 
   if (!sharedMessage) {
     return {
-      title: "Shared message not found | BAV Network",
+      title: "Shared message not found",
       description: "This shared message is unavailable or has expired.",
     };
   }
@@ -44,8 +53,13 @@ export async function generateMetadata({
   const description =
     sharedMessage.preview_text?.trim() ||
     "Open this shared message from BAV Network.";
-  const image = getOgImage(sharedMessage);
+  const image =
+    sharedMessage.preview_type === "image" ||
+    sharedMessage.preview_type === "video"
+      ? `${siteUrl}/api/og/shared-message?token=${token}`
+      : getOgImage(sharedMessage);
   const url = `${siteUrl}/m/${token}`;
+  const ogType = getOgType(sharedMessage);
 
   return {
     title,
@@ -58,7 +72,7 @@ export async function generateMetadata({
       description,
       url,
       siteName: "BAV Network",
-      type: "article",
+      type: ogType,
       images: [
         {
           url: image,
@@ -87,31 +101,58 @@ function MediaHeader({
     sharedMessage.thumbnail_url?.trim()
   ) {
     return (
-      <img
-        src={sharedMessage.thumbnail_url}
-        alt={sharedMessage.title || "Shared image"}
-        className="h-64 w-full object-cover"
-      />
+      <div className="w-full bg-white">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={sharedMessage.thumbnail_url}
+          alt={sharedMessage.title || "Shared image"}
+          className="block h-auto w-full"
+        />
+      </div>
     );
   }
 
-  if (
-    sharedMessage.preview_type === "video" &&
-    sharedMessage.media_url?.trim()
-  ) {
-    return (
-      <div className="bg-black">
-        <video
-          src={sharedMessage.media_url}
-          controls
-          preload="metadata"
-          playsInline
-          className="h-64 w-full bg-black"
-        >
-          Your browser does not support video playback.
-        </video>
-      </div>
-    );
+  if (sharedMessage.preview_type === "video") {
+    if (sharedMessage.thumbnail_url?.trim()) {
+      return (
+        <div className="relative h-64 w-full bg-black">
+          <Image
+            src={sharedMessage.thumbnail_url}
+            alt={sharedMessage.title || "Shared video"}
+            fill
+            className="object-contain"
+            unoptimized
+          />
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-black/65 text-white shadow-lg">
+              <svg
+                viewBox="0 0 24 24"
+                className="ml-1 h-8 w-8 fill-current"
+                aria-hidden="true"
+              >
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (sharedMessage.media_url?.trim()) {
+      return (
+        <div className="bg-black">
+          <video
+            src={sharedMessage.media_url}
+            controls
+            preload="metadata"
+            playsInline
+            className="h-64 w-full bg-black"
+          >
+            Your browser does not support video playback.
+          </video>
+        </div>
+      );
+    }
   }
 
   if (
