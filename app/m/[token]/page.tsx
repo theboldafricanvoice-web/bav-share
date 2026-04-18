@@ -1,4 +1,4 @@
-import { getSharedMessageByToken } from "@/lib/sharedMessages";
+import { getSharedMessageByToken } from "../../../lib/sharedMessages";
 import type { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
@@ -34,6 +34,12 @@ function getOgType(
   }
 
   return "article";
+}
+
+function getMediaUrl(
+  sharedMessage: Awaited<ReturnType<typeof getSharedMessageByToken>>
+) {
+  return sharedMessage?.media_url?.trim() || null;
 }
 
 export async function generateMetadata({
@@ -96,6 +102,8 @@ function MediaHeader({
 }: {
   sharedMessage: NonNullable<Awaited<ReturnType<typeof getSharedMessageByToken>>>;
 }) {
+  const mediaUrl = getMediaUrl(sharedMessage);
+
   if (
     sharedMessage.preview_type === "image" &&
     sharedMessage.thumbnail_url?.trim()
@@ -134,15 +142,25 @@ function MediaHeader({
               </svg>
             </div>
           </div>
+          {mediaUrl ? (
+            <a
+              href={mediaUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="absolute bottom-4 right-4 rounded-full bg-white px-4 py-2 text-sm font-semibold text-neutral-900 shadow-lg transition hover:bg-neutral-200"
+            >
+              Watch video
+            </a>
+          ) : null}
         </div>
       );
     }
 
-    if (sharedMessage.media_url?.trim()) {
+    if (mediaUrl) {
       return (
         <div className="bg-black">
           <video
-            src={sharedMessage.media_url}
+            src={mediaUrl}
             controls
             preload="metadata"
             playsInline
@@ -229,6 +247,8 @@ export default async function SharedMessagePage({ params }: PageProps) {
     notFound();
   }
 
+  const mediaUrl = getMediaUrl(sharedMessage);
+
   return (
     <main className="min-h-screen bg-neutral-100 px-4 py-10 text-neutral-900">
       <div className="mx-auto max-w-2xl overflow-hidden rounded-2xl bg-white shadow-lg">
@@ -259,11 +279,48 @@ export default async function SharedMessagePage({ params }: PageProps) {
             </div>
           )}
 
+          {sharedMessage.preview_type === "video" && mediaUrl ? (
+            <div className="mt-6 space-y-4">
+              <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-black">
+                <video
+                  src={mediaUrl}
+                  controls
+                  preload="metadata"
+                  playsInline
+                  poster={sharedMessage.thumbnail_url?.trim() || undefined}
+                  className="w-full bg-black"
+                >
+                  Your browser does not support video playback.
+                </video>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <a
+                  href={mediaUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex rounded-full bg-neutral-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-700"
+                >
+                  Watch video
+                </a>
+                <a
+                  href={mediaUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  download={sharedMessage.file_name || undefined}
+                  className="inline-flex rounded-full border border-neutral-300 bg-white px-5 py-2.5 text-sm font-semibold text-neutral-900 transition hover:bg-neutral-100"
+                >
+                  Download video
+                </a>
+              </div>
+            </div>
+          ) : null}
+
           {sharedMessage.preview_type === "file" &&
-          sharedMessage.media_url?.trim() ? (
+          mediaUrl ? (
             <div className="mt-4">
               <a
-                href={sharedMessage.media_url}
+                href={mediaUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="text-sm font-medium text-neutral-700 underline underline-offset-4"
