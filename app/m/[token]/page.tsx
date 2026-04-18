@@ -121,6 +121,23 @@ function MediaHeader({
   }
 
   if (sharedMessage.preview_type === "video") {
+    if (mediaUrl) {
+      return (
+        <div className="overflow-hidden bg-black">
+          <video
+            src={mediaUrl}
+            controls
+            preload="metadata"
+            playsInline
+            poster={sharedMessage.thumbnail_url?.trim() || undefined}
+            className="h-64 w-full bg-black object-contain"
+          >
+            Your browser does not support video playback.
+          </video>
+        </div>
+      );
+    }
+
     if (sharedMessage.thumbnail_url?.trim()) {
       return (
         <div className="relative h-64 w-full bg-black">
@@ -131,43 +148,6 @@ function MediaHeader({
             className="object-contain"
             unoptimized
           />
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-black/65 text-white shadow-lg">
-              <svg
-                viewBox="0 0 24 24"
-                className="ml-1 h-8 w-8 fill-current"
-                aria-hidden="true"
-              >
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </div>
-          </div>
-          {mediaUrl ? (
-            <a
-              href={mediaUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="absolute bottom-4 right-4 rounded-full bg-white px-4 py-2 text-sm font-semibold text-neutral-900 shadow-lg transition hover:bg-neutral-200"
-            >
-              Watch video
-            </a>
-          ) : null}
-        </div>
-      );
-    }
-
-    if (mediaUrl) {
-      return (
-        <div className="bg-black">
-          <video
-            src={mediaUrl}
-            controls
-            preload="metadata"
-            playsInline
-            className="h-64 w-full bg-black"
-          >
-            Your browser does not support video playback.
-          </video>
         </div>
       );
     }
@@ -281,19 +261,6 @@ export default async function SharedMessagePage({ params }: PageProps) {
 
           {sharedMessage.preview_type === "video" && mediaUrl ? (
             <div className="mt-6 space-y-4">
-              <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-black">
-                <video
-                  src={mediaUrl}
-                  controls
-                  preload="metadata"
-                  playsInline
-                  poster={sharedMessage.thumbnail_url?.trim() || undefined}
-                  className="w-full bg-black"
-                >
-                  Your browser does not support video playback.
-                </video>
-              </div>
-
               <div className="flex flex-wrap gap-3">
                 <a
                   href={mediaUrl}
