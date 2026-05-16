@@ -38,11 +38,14 @@ type DingConnectProduct = {
   ReceiveCurrencyIso?: string | null;
   UatNumber?: string | null;
   ValidityPeriodISO?: string | null;
+  ValidityPeriodIso?: string | null;
   Benefits?: unknown;
   ProcessingType?: string | null;
+  ProcessingMode?: string | null;
   IsFixedDenomination?: boolean | null;
   Minimum?: number | null;
   Maximum?: number | null;
+  CommissionRate?: number | null;
 };
 
 type DingConnectTransferResponse = {
@@ -256,7 +259,10 @@ function mapDingConnectProductType(product: DingConnectProduct) {
   const benefits = Array.isArray(product.Benefits)
     ? product.Benefits.map((value) => String(value).toLowerCase())
     : [];
-  const processingType = product.ProcessingType?.trim().toLowerCase() ?? "";
+  const processingType =
+    product.ProcessingType?.trim().toLowerCase() ??
+    product.ProcessingMode?.trim().toLowerCase() ??
+    "";
 
   if (
     benefits.some((value) => value.includes("data") || value.includes("bundle")) ||
@@ -275,6 +281,80 @@ function deriveProductDisplayName(product: DingConnectProduct, providerName: str
     product.Name?.trim() ||
     `${providerName} ${product.SkuCode?.trim() || "Top-Up"}`
   );
+}
+
+function getNestedRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readNestedString(record: Record<string, unknown> | null, ...keys: string[]) {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function readNestedNumber(record: Record<string, unknown> | null, ...keys: string[]) {
+  for (const key of keys) {
+    const parsed = coerceNumber(record?.[key]);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
+function extractDingConnectAmounts(product: DingConnectProduct) {
+  const minimumRecord = getNestedRecord(product.Minimum);
+  const maximumRecord = getNestedRecord(product.Maximum);
+
+  const minSendValue =
+    readNestedNumber(minimumRecord, "SendValue", "sendValue", "Value", "value") ??
+    coerceNumber(product.Minimum);
+  const maxSendValue =
+    readNestedNumber(maximumRecord, "SendValue", "sendValue", "Value", "value") ??
+    coerceNumber(product.Maximum);
+
+  const minReceiveValue = readNestedNumber(
+    minimumRecord,
+    "ReceiveValue",
+    "receiveValue",
+    "Value",
+    "value"
+  );
+  const maxReceiveValue = readNestedNumber(
+    maximumRecord,
+    "ReceiveValue",
+    "receiveValue",
+    "Value",
+    "value"
+  );
+
+  const sendCurrency =
+    readNestedString(minimumRecord, "SendCurrencyIso", "CurrencyIso", "CurrencyCode") ??
+    readNestedString(maximumRecord, "SendCurrencyIso", "CurrencyIso", "CurrencyCode");
+  const receiveCurrency =
+    readNestedString(
+      minimumRecord,
+      "ReceiveCurrencyIso",
+      "CurrencyIso",
+      "CurrencyCode"
+    ) ??
+    readNestedString(
+      maximumRecord,
+      "ReceiveCurrencyIso",
+      "CurrencyIso",
+      "CurrencyCode"
+    );
+
+  return {
+    minSendValue,
+    maxSendValue,
+    minReceiveValue,
+    maxReceiveValue,
+    sendCurrency: sendCurrency?.toUpperCase() ?? null,
+    receiveCurrency: receiveCurrency?.toUpperCase() ?? null,
+  };
 }
 
 async function ensureDingConnectProviderRow(supabaseAdmin: SupabaseClient) {
@@ -401,7 +481,10 @@ export async function syncDingConnectCatalog(params: {
 
     const skuCode = product.SkuCode?.trim();
     const providerCode = product.ProviderCode?.trim();
-    const countryCode = product.CountryIso?.trim().toUpperCase();
+    const countryCode =
+      product.CountryIso?.trim().toUpperCase() ??
+      providerByCode.get(providerCode ?? "")?.CountryIso?.trim().toUpperCase() ??
+      null;
 
     if (!skuCode || !providerCode || !countryCode) {
       if (summary.skippedProducts.length < 10) {
@@ -414,15 +497,24 @@ export async function syncDingConnectCatalog(params: {
       continue;
     }
 
-    const sendValue = coerceNumber(product.SendValue);
-    const sendCurrency = product.SendCurrencyIso?.trim().toUpperCase() ?? null;
-    const receiveValue = coerceNumber(product.ReceiveValue);
-    const receiveCurrency = product.ReceiveCurrencyIso?.trim().toUpperCase() ?? null;
+    const {
+      minSendValue,
+      maxSendValue,
+      minReceiveValue,
+      maxReceiveValue,
+      sendCurrency,
+      receiveCurrency,
+    } = extractDingConnectAmounts(product);
 
-    if (sendValue == null || sendCurrency == null || receiveValue == null) {
+    if (
+      minSendValue == null ||
+      maxSendValue == null ||
+      sendCurrency == null ||
+      minReceiveValue == null
+    ) {
       if (summary.skippedProducts.length < 10) {
         summary.skippedProducts.push(
-          `${skuCode}: missing send/receive pricing data.`
+          `${skuCode}: missing min/max pricing data.`
         );
       }
       continue;
@@ -431,7 +523,7 @@ export async function syncDingConnectCatalog(params: {
     const isFixed =
       typeof product.IsFixedDenomination === "boolean"
         ? product.IsFixedDenomination
-        : true;
+        : Math.abs(minSendValue - maxSendValue) < 0.000001;
 
     if (!isFixed) {
       if (summary.skippedProducts.length < 10) {
@@ -462,6 +554,10 @@ export async function syncDingConnectCatalog(params: {
 
     const displayName = deriveProductDisplayName(product, providerName);
     const productType = mapDingConnectProductType(product);
+    const validityPeriod =
+      product.ValidityPeriodIso ?? product.ValidityPeriodISO ?? null;
+    const sendValue = minSendValue;
+    const receiveValue = minReceiveValue;
 
     const { error: productError } = await supabaseAdmin
       .from("data_topup_products")
@@ -480,7 +576,7 @@ export async function syncDingConnectCatalog(params: {
           retail_price: sendValue,
           cost_price: null,
           data_volume_label: null,
-          validity_label: product.ValidityPeriodISO ?? null,
+          validity_label: validityPeriod,
           is_active: activate,
           provider_metadata: {
             source: "dingconnect",
@@ -488,12 +584,17 @@ export async function syncDingConnectCatalog(params: {
             countryCode,
             receiveCurrency: receiveCurrency ?? sendCurrency,
             receiveValue,
+            maxReceiveValue,
             sendCurrency,
             sendValue,
+            maxSendValue,
             uatNumber: product.UatNumber ?? null,
-            validityPeriodISO: product.ValidityPeriodISO ?? null,
+            validityPeriodISO: validityPeriod,
             benefits: Array.isArray(product.Benefits) ? product.Benefits : [],
             isFixedDenomination: isFixed,
+            commissionRate: product.CommissionRate ?? null,
+            minimum: getNestedRecord(product.Minimum),
+            maximum: getNestedRecord(product.Maximum),
           },
         },
         {
