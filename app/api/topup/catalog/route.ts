@@ -1,4 +1,8 @@
 import { authenticateTopupRequest } from "@/lib/topup/auth";
+import {
+  compareTopupProviderPriority,
+  normalizeTopupComparableText,
+} from "@/lib/topup/providers/preference";
 import { jsonError, readString } from "@/lib/topup/utils";
 import { NextResponse } from "next/server";
 
@@ -26,7 +30,17 @@ export async function GET(request: Request) {
 
     let networksQuery = auth.supabaseAdmin
       .from("data_topup_networks")
-      .select("id, provider_id, country_code, network_code, name, is_active")
+      .select(`
+        id,
+        provider_id,
+        country_code,
+        network_code,
+        name,
+        is_active,
+        data_topup_providers:provider_id (
+          code
+        )
+      `)
       .eq("is_active", true)
       .order("name", { ascending: true });
 
@@ -40,6 +54,40 @@ export async function GET(request: Request) {
       console.error("GET /api/topup/catalog networks error:", networksError);
       return jsonError("Unable to load top-up networks.", 500);
     }
+
+    const preferredNetworksMap = new Map<string, any>();
+    for (const network of networks ?? []) {
+      const providerCode = Array.isArray((network as any).data_topup_providers)
+        ? (network as any).data_topup_providers[0]?.code ?? null
+        : (network as any).data_topup_providers?.code ?? null;
+      const key = `${String(network.country_code ?? "").trim().toUpperCase()}::${normalizeTopupComparableText(
+        String(network.name ?? "")
+      )}`;
+      const current = preferredNetworksMap.get(key);
+
+      if (!current) {
+        preferredNetworksMap.set(key, network);
+        continue;
+      }
+
+      const currentProviderCode = Array.isArray((current as any).data_topup_providers)
+        ? (current as any).data_topup_providers[0]?.code ?? null
+        : (current as any).data_topup_providers?.code ?? null;
+
+      if (compareTopupProviderPriority(providerCode, currentProviderCode) < 0) {
+        preferredNetworksMap.set(key, network);
+      }
+    }
+
+    const preferredNetworks = Array.from(preferredNetworksMap.values()).map((network) => ({
+      id: network.id,
+      provider_id: network.provider_id,
+      country_code: network.country_code,
+      network_code: network.network_code,
+      name: network.name,
+      is_active: network.is_active,
+    }));
+    const allowedNetworkIds = new Set(preferredNetworks.map((network) => network.id));
 
     let productsQuery = auth.supabaseAdmin
       .from("data_topup_products")
@@ -75,6 +123,10 @@ export async function GET(request: Request) {
       return jsonError("Unable to load top-up products.", 500);
     }
 
+    const preferredProducts = (products ?? []).filter((product) =>
+      allowedNetworkIds.has(product.network_id)
+    );
+
     const countries = Array.from(
       new Set(
         (countryRows ?? [])
@@ -86,8 +138,8 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       countries,
-      networks: networks ?? [],
-      products: products ?? [],
+      networks: preferredNetworks,
+      products: preferredProducts,
     });
   } catch (error) {
     console.error("GET /api/topup/catalog error:", error);

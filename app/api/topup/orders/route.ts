@@ -1,4 +1,8 @@
 import { authenticateTopupRequest } from "@/lib/topup/auth";
+import {
+  compareTopupProviderPriority,
+  normalizeTopupComparableText,
+} from "@/lib/topup/providers/preference";
 import { toCanonicalTopupOrderStatus } from "@/lib/topup/types";
 import { buildOrderRef, jsonError, normalizeMsisdn, readString } from "@/lib/topup/utils";
 import { NextResponse } from "next/server";
@@ -16,6 +20,18 @@ type CreateTopupOrderBody = {
 function isCreateTopupOrderBody(value: unknown): value is CreateTopupOrderBody {
   if (!value || typeof value !== "object") return false;
   return true;
+}
+
+function readProviderCode(record: any) {
+  return Array.isArray(record?.data_topup_providers)
+    ? record.data_topup_providers[0]?.code ?? "manual"
+    : record?.data_topup_providers?.code ?? "manual";
+}
+
+function readProviderName(record: any) {
+  return Array.isArray(record?.data_topup_providers)
+    ? record.data_topup_providers[0]?.name ?? null
+    : record?.data_topup_providers?.name ?? null;
 }
 
 export async function POST(request: Request) {
@@ -101,6 +117,92 @@ export async function POST(request: Request) {
       return jsonError("Selected top-up network was not found.", 404);
     }
 
+    const selectedProviderCode = readProviderCode(product as any);
+    const selectedProviderName = readProviderName(product as any);
+
+    const { data: fallbackProductRows, error: fallbackProductsError } = await auth.supabaseAdmin
+      .from("data_topup_products")
+      .select(`
+        id,
+        provider_id,
+        network_id,
+        product_type,
+        provider_product_code,
+        display_name,
+        description,
+        currency,
+        face_value,
+        retail_price,
+        cost_price,
+        data_volume_label,
+        validity_label,
+        is_active,
+        data_topup_providers:provider_id (
+          code,
+          name
+        ),
+        data_topup_networks:network_id (
+          id,
+          country_code,
+          network_code,
+          name
+        )
+      `)
+      .eq("is_active", true)
+      .eq("product_type", product.product_type ?? "data_bundle")
+      .eq("currency", product.currency)
+      .eq("face_value", product.face_value)
+      .eq("retail_price", product.retail_price);
+
+    if (fallbackProductsError) {
+      console.error("POST /api/topup/orders fallback lookup error:", fallbackProductsError);
+      return jsonError("Unable to build the top-up fulfillment route.", 500);
+    }
+
+    const fallbackCandidates = (fallbackProductRows ?? [])
+      .filter((candidate: any) => candidate.id !== product.id)
+      .filter((candidate: any) => {
+        const candidateNetwork = Array.isArray(candidate.data_topup_networks)
+          ? candidate.data_topup_networks[0] ?? null
+          : candidate.data_topup_networks ?? null;
+        const candidateProviderCode = readProviderCode(candidate);
+        return (
+          candidateNetwork?.country_code === network.country_code &&
+          candidateProviderCode !== selectedProviderCode &&
+          normalizeTopupComparableText(candidateNetwork?.name ?? "") ===
+            normalizeTopupComparableText(network.name)
+        );
+      })
+      .sort((left: any, right: any) =>
+        compareTopupProviderPriority(readProviderCode(left), readProviderCode(right))
+      )
+      .map((candidate: any) => {
+        const candidateNetwork = Array.isArray(candidate.data_topup_networks)
+          ? candidate.data_topup_networks[0] ?? null
+          : candidate.data_topup_networks ?? null;
+        return {
+          productId: candidate.id,
+          networkId: candidate.network_id,
+          providerId: candidate.provider_id,
+          providerCode: readProviderCode(candidate),
+          providerName: readProviderName(candidate),
+          productType: candidate.product_type ?? "data_bundle",
+          providerProductCode: candidate.provider_product_code,
+          displayName: candidate.display_name,
+          description: candidate.description ?? null,
+          currency: candidate.currency,
+          faceValue: candidate.face_value,
+          retailPrice: candidate.retail_price,
+          costPrice: candidate.cost_price ?? null,
+          dataVolumeLabel: candidate.data_volume_label ?? null,
+          validityLabel: candidate.validity_label ?? null,
+          networkName: candidateNetwork?.name ?? null,
+          networkCode: candidateNetwork?.network_code ?? null,
+          countryCode: candidateNetwork?.country_code ?? null,
+        };
+      })
+      .slice(0, 2);
+
     const orderRef = buildOrderRef();
     const nowIso = new Date().toISOString();
 
@@ -108,14 +210,8 @@ export async function POST(request: Request) {
       productId: product.id,
       networkId: product.network_id,
       providerId: product.provider_id,
-      providerCode:
-        Array.isArray((product as any).data_topup_providers)
-          ? (product as any).data_topup_providers[0]?.code ?? "manual"
-          : (product as any).data_topup_providers?.code ?? "manual",
-      providerName:
-        Array.isArray((product as any).data_topup_providers)
-          ? (product as any).data_topup_providers[0]?.name ?? null
-          : (product as any).data_topup_providers?.name ?? null,
+      providerCode: selectedProviderCode,
+      providerName: selectedProviderName,
       productType: product.product_type ?? "data_bundle",
       providerProductCode: product.provider_product_code,
       displayName: product.display_name,
@@ -129,6 +225,7 @@ export async function POST(request: Request) {
       networkName: network.name,
       networkCode: network.network_code,
       countryCode: network.country_code,
+      fallbackCandidates,
       lockedAt: nowIso,
     };
 

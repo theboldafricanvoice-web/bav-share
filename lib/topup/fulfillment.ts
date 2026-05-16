@@ -4,6 +4,148 @@ import type { FulfillmentStatusResult } from "@/lib/topup/providers/base";
 import { isProcessingTopupState, isVerifiedTopupPaymentState } from "@/lib/topup/types";
 import { buildIdempotencyKey, buildProviderRequestRef } from "@/lib/topup/utils";
 
+type PurchaseContext = {
+  providerId: string | null;
+  providerCode: string;
+  networkCode: string;
+  providerProductCode: string;
+  amount: number;
+  currency: string;
+  productId?: string | null;
+  networkId?: string | null;
+  productType?: string | null;
+  displayName?: string | null;
+  description?: string | null;
+  faceValue?: number | null;
+  retailPrice?: number | null;
+  costPrice?: number | null;
+  dataVolumeLabel?: string | null;
+  validityLabel?: string | null;
+  networkName?: string | null;
+  countryCode?: string | null;
+};
+
+function readStringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readNumberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : typeof value === "string" && value.trim() && Number.isFinite(Number(value.trim()))
+    ? Number(value.trim())
+    : null;
+}
+
+function buildPurchaseContextFromSnapshot(params: {
+  snapshot: Record<string, unknown>;
+  order: {
+    provider_id: string | null;
+    country_code: string;
+    currency: string;
+    sale_amount: number;
+  };
+}): PurchaseContext | null {
+  const { snapshot, order } = params;
+  const providerCode = readStringValue(snapshot.providerCode) ?? "manual";
+  const networkCode = readStringValue(snapshot.networkCode);
+  const providerProductCode = readStringValue(snapshot.providerProductCode);
+
+  if (!networkCode || !providerProductCode) {
+    return null;
+  }
+
+  return {
+    providerId: order.provider_id,
+    providerCode,
+    networkCode,
+    providerProductCode,
+    amount: Number(order.sale_amount),
+    currency: order.currency,
+    productId: readStringValue(snapshot.productId),
+    networkId: readStringValue(snapshot.networkId),
+    productType: readStringValue(snapshot.productType),
+    displayName: readStringValue(snapshot.displayName),
+    description: readStringValue(snapshot.description),
+    faceValue: readNumberValue(snapshot.faceValue),
+    retailPrice: readNumberValue(snapshot.retailPrice),
+    costPrice: readNumberValue(snapshot.costPrice),
+    dataVolumeLabel: readStringValue(snapshot.dataVolumeLabel),
+    validityLabel: readStringValue(snapshot.validityLabel),
+    networkName: readStringValue(snapshot.networkName),
+    countryCode: readStringValue(snapshot.countryCode) ?? order.country_code,
+  };
+}
+
+function buildPurchaseContextFromFallbackCandidate(
+  value: unknown,
+  order: {
+    country_code: string;
+    currency: string;
+    sale_amount: number;
+  }
+): PurchaseContext | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const snapshot = value as Record<string, unknown>;
+  const providerCode = readStringValue(snapshot.providerCode);
+  const networkCode = readStringValue(snapshot.networkCode);
+  const providerProductCode = readStringValue(snapshot.providerProductCode);
+  const providerId = readStringValue(snapshot.providerId);
+
+  if (!providerCode || !networkCode || !providerProductCode || !providerId) {
+    return null;
+  }
+
+  return {
+    providerId,
+    providerCode,
+    networkCode,
+    providerProductCode,
+    amount: readNumberValue(snapshot.retailPrice) ?? Number(order.sale_amount),
+    currency: readStringValue(snapshot.currency) ?? order.currency,
+    productId: readStringValue(snapshot.productId),
+    networkId: readStringValue(snapshot.networkId),
+    productType: readStringValue(snapshot.productType),
+    displayName: readStringValue(snapshot.displayName),
+    description: readStringValue(snapshot.description),
+    faceValue: readNumberValue(snapshot.faceValue),
+    retailPrice: readNumberValue(snapshot.retailPrice),
+    costPrice: readNumberValue(snapshot.costPrice),
+    dataVolumeLabel: readStringValue(snapshot.dataVolumeLabel),
+    validityLabel: readStringValue(snapshot.validityLabel),
+    networkName: readStringValue(snapshot.networkName),
+    countryCode: readStringValue(snapshot.countryCode) ?? order.country_code,
+  };
+}
+
+async function markFulfillmentAttemptFailed(params: {
+  supabaseAdmin: SupabaseClient;
+  attemptId: string;
+  providerTransactionRef?: string | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+  raw: Record<string, unknown>;
+}) {
+  const { supabaseAdmin } = params;
+  const nowIso = new Date().toISOString();
+
+  const { error } = await supabaseAdmin
+    .from("data_topup_fulfillment_attempts")
+    .update({
+      provider_transaction_ref: params.providerTransactionRef ?? null,
+      response_payload: params.raw,
+      status: "failed",
+      failure_code: params.failureCode ?? "provider_failed",
+      failure_message: params.failureMessage ?? "Provider reported fulfillment failure.",
+      completed_at: nowIso,
+    })
+    .eq("id", params.attemptId);
+
+  if (error) {
+    throw new Error("Unable to update failed top-up fulfillment attempt.");
+  }
+}
+
 export async function queueTopupOrderForFulfillment(params: {
   supabaseAdmin: SupabaseClient;
   orderId: string;
@@ -264,30 +406,21 @@ export async function executeQueuedTopupOrder(params: {
   }
 
   const snapshot = order.locked_product_snapshot ?? {};
-  const providerCode =
-    typeof snapshot.providerCode === "string"
-      ? snapshot.providerCode
-      : "manual";
-  const networkCode =
-    typeof snapshot.networkCode === "string" ? snapshot.networkCode : "";
-  const providerProductCode =
-    typeof snapshot.providerProductCode === "string"
-      ? snapshot.providerProductCode
-      : "";
+  const primaryContext = buildPurchaseContextFromSnapshot({
+    snapshot,
+    order,
+  });
+  const fallbackContexts = Array.isArray(snapshot.fallbackCandidates)
+    ? snapshot.fallbackCandidates
+        .map((value) => buildPurchaseContextFromFallbackCandidate(value, order))
+        .filter((value): value is PurchaseContext => Boolean(value))
+    : [];
+  const purchaseContexts = [primaryContext, ...fallbackContexts].filter(
+    (value): value is PurchaseContext => Boolean(value)
+  );
 
-  if (!networkCode || !providerProductCode) {
-    throw new Error(
-      "Queued top-up order is missing required provider snapshot fields."
-    );
-  }
-
-  if (!order.provider_id) {
-    throw new Error("Queued top-up order is missing a provider assignment.");
-  }
-
-  const adapter = getTopupAggregatorAdapter(providerCode);
-  if (!adapter) {
-    throw new Error(`No top-up aggregator adapter is configured for ${providerCode}.`);
+  if (purchaseContexts.length === 0) {
+    throw new Error("Queued top-up order is missing required provider snapshot fields.");
   }
 
   const { data: existingAttempts, error: attemptsLookupError } = await supabaseAdmin
@@ -302,96 +435,214 @@ export async function executeQueuedTopupOrder(params: {
   }
 
   const lastAttemptNo = Number((existingAttempts ?? [])[0]?.attempt_no ?? 0);
-  const attemptNo = lastAttemptNo + 1;
-  const providerRequestRef = buildProviderRequestRef();
-  const idempotencyKey = buildIdempotencyKey(`topup-${order.id}`);
+  let nextAttemptNo = lastAttemptNo + 1;
 
-  const { data: attempt, error: attemptInsertError } = await supabaseAdmin
-    .from("data_topup_fulfillment_attempts")
-    .insert({
-      order_id: order.id,
-      provider_id: order.provider_id,
-      attempt_no: attemptNo,
-      idempotency_key: idempotencyKey,
-      provider_request_ref: providerRequestRef,
-      request_payload: {
-        providerCode,
+  for (let index = 0; index < purchaseContexts.length; index += 1) {
+    const context = purchaseContexts[index];
+    const isLastContext = index === purchaseContexts.length - 1;
+    const adapter = getTopupAggregatorAdapter(context.providerCode);
+
+    if (!adapter) {
+      if (isLastContext) {
+        throw new Error(
+          `No top-up aggregator adapter is configured for ${context.providerCode}.`
+        );
+      }
+      continue;
+    }
+
+    if (!context.providerId) {
+      if (isLastContext) {
+        throw new Error(
+          `Top-up fallback provider ${context.providerCode} is missing a provider id.`
+        );
+      }
+      continue;
+    }
+
+    const attemptNo = nextAttemptNo;
+    nextAttemptNo += 1;
+    const providerRequestRef = buildProviderRequestRef();
+    const idempotencyKey = buildIdempotencyKey(
+      `topup-${order.id}-${context.providerCode}-${attemptNo}`
+    );
+
+    const { data: attempt, error: attemptInsertError } = await supabaseAdmin
+      .from("data_topup_fulfillment_attempts")
+      .insert({
+        order_id: order.id,
+        provider_id: context.providerId,
+        attempt_no: attemptNo,
+        idempotency_key: idempotencyKey,
+        provider_request_ref: providerRequestRef,
+        request_payload: {
+          providerCode: context.providerCode,
+          orderRef: order.order_ref,
+          recipientMsisdn: order.recipient_msisdn,
+          countryCode: context.countryCode ?? order.country_code,
+          networkCode: context.networkCode,
+          providerProductCode: context.providerProductCode,
+          amount: context.amount,
+          currency: context.currency,
+        },
+        status: "queued",
+      })
+      .select("id, attempt_no, provider_request_ref")
+      .single();
+
+    if (attemptInsertError || !attempt) {
+      throw new Error("Unable to create top-up fulfillment attempt.");
+    }
+
+    try {
+      const purchaseResult = await adapter.purchaseBundle({
         orderRef: order.order_ref,
-        recipientMsisdn: order.recipient_msisdn,
-        countryCode: order.country_code,
-        networkCode,
-        providerProductCode,
-        amount: order.sale_amount,
-        currency: order.currency,
-      },
-      status: "queued",
-    })
-    .select("id, attempt_no, provider_request_ref")
-    .single();
-
-  if (attemptInsertError || !attempt) {
-    throw new Error("Unable to create top-up fulfillment attempt.");
-  }
-
-  const purchaseResult = await adapter.purchaseBundle({
-    orderRef: order.order_ref,
-    providerRequestRef,
-    recipientMsisdn: order.recipient_msisdn,
-    countryCode: order.country_code,
-    networkCode,
-    providerProductCode,
-    amount: Number(order.sale_amount),
-    currency: order.currency,
-  });
-
-  const mappedStatus = await applyFulfillmentStatusToAttemptAndOrder({
-    supabaseAdmin,
-    orderId: order.id,
-    attemptId: attempt.id,
-    providerStatusResult: {
-      providerStatus:
-        purchaseResult.providerStatus === "accepted"
-          ? "pending"
-          : purchaseResult.providerStatus,
-      providerRequestRef,
-      providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-      providerMessage: purchaseResult.providerMessage ?? null,
-      raw: purchaseResult.raw,
-    },
-  });
-
-  const { error: eventError } = await supabaseAdmin
-    .from("data_topup_order_events")
-    .insert({
-      order_id: order.id,
-      actor_type: "system",
-      event_type: "fulfillment_submitted",
-      message:
-        purchaseResult.providerMessage ??
-        "Top-up fulfillment request was sent to the provider.",
-      payload: {
-        attemptNo,
-        providerCode,
         providerRequestRef,
-        providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-        providerStatus: purchaseResult.providerStatus,
-      },
-    });
+        recipientMsisdn: order.recipient_msisdn,
+        countryCode: context.countryCode ?? order.country_code,
+        networkCode: context.networkCode,
+        providerProductCode: context.providerProductCode,
+        amount: Number(context.amount),
+        currency: context.currency,
+      });
 
-  if (eventError) {
-    console.error("executeQueuedTopupOrder event insert error:", eventError);
+      if (purchaseResult.providerStatus === "failed" && !isLastContext) {
+        await markFulfillmentAttemptFailed({
+          supabaseAdmin,
+          attemptId: attempt.id,
+          providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+          failureCode: "provider_failed",
+          failureMessage:
+            purchaseResult.providerMessage ??
+            `Provider ${context.providerCode} failed before fallback.`,
+          raw: purchaseResult.raw,
+        });
+
+        const { error: fallbackEventError } = await supabaseAdmin
+          .from("data_topup_order_events")
+          .insert({
+            order_id: order.id,
+            actor_type: "system",
+            event_type: "fulfillment_fallback_triggered",
+            message:
+              purchaseResult.providerMessage ??
+              `Falling back after ${context.providerCode} fulfillment failure.`,
+            payload: {
+              attemptNo,
+              providerCode: context.providerCode,
+              providerRequestRef,
+              providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+              nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+            },
+          });
+
+        if (fallbackEventError) {
+          console.error(
+            "executeQueuedTopupOrder fallback event insert error:",
+            fallbackEventError
+          );
+        }
+
+        continue;
+      }
+
+      const mappedStatus = await applyFulfillmentStatusToAttemptAndOrder({
+        supabaseAdmin,
+        orderId: order.id,
+        attemptId: attempt.id,
+        providerStatusResult: {
+          providerStatus:
+            purchaseResult.providerStatus === "accepted"
+              ? "pending"
+              : purchaseResult.providerStatus,
+          providerRequestRef,
+          providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+          providerMessage: purchaseResult.providerMessage ?? null,
+          raw: purchaseResult.raw,
+        },
+      });
+
+      const { error: eventError } = await supabaseAdmin
+        .from("data_topup_order_events")
+        .insert({
+          order_id: order.id,
+          actor_type: "system",
+          event_type: "fulfillment_submitted",
+          message:
+            purchaseResult.providerMessage ??
+            "Top-up fulfillment request was sent to the provider.",
+          payload: {
+            attemptNo,
+            providerCode: context.providerCode,
+            providerRequestRef,
+            providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+            providerStatus: purchaseResult.providerStatus,
+          },
+        });
+
+      if (eventError) {
+        console.error("executeQueuedTopupOrder event insert error:", eventError);
+      }
+
+      return {
+        ok: true as const,
+        orderId: order.id,
+        orderRef: order.order_ref,
+        attemptId: attempt.id,
+        attemptNo,
+        providerCode: context.providerCode,
+        providerStatus: purchaseResult.providerStatus,
+        fulfillmentStatus: mappedStatus.fulfillment_status,
+      };
+    } catch (error) {
+      if (!isLastContext) {
+        await markFulfillmentAttemptFailed({
+          supabaseAdmin,
+          attemptId: attempt.id,
+          failureCode: "provider_error",
+          failureMessage:
+            error instanceof Error
+              ? error.message
+              : `Provider ${context.providerCode} threw an unknown error.`,
+          raw: {
+            providerCode: context.providerCode,
+            error: error instanceof Error ? error.message : "Unknown provider error",
+          },
+        });
+
+        const { error: fallbackEventError } = await supabaseAdmin
+          .from("data_topup_order_events")
+          .insert({
+            order_id: order.id,
+            actor_type: "system",
+            event_type: "fulfillment_fallback_triggered",
+            message:
+              error instanceof Error
+                ? error.message
+                : `Falling back after ${context.providerCode} error.`,
+            payload: {
+              attemptNo,
+              providerCode: context.providerCode,
+              providerRequestRef,
+              nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+            },
+          });
+
+        if (fallbackEventError) {
+          console.error(
+            "executeQueuedTopupOrder fallback error event insert error:",
+            fallbackEventError
+          );
+        }
+
+        continue;
+      }
+
+      throw error;
+    }
   }
 
-  return {
-    ok: true as const,
-    orderId: order.id,
-    orderRef: order.order_ref,
-    attemptId: attempt.id,
-    attemptNo,
-    providerCode,
-    providerStatus: purchaseResult.providerStatus,
-    fulfillmentStatus: mappedStatus.fulfillment_status,
-  };
+  throw new Error("No top-up provider was able to accept this fulfillment request.");
 }
 
 export async function reconcileTopupFulfillmentAttempt(params: {

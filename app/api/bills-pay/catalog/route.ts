@@ -63,9 +63,29 @@ export async function GET(request: Request) {
       return jsonError("Unable to load billers.", 500);
     }
 
+    const { data: countries, error: countriesError } = await auth.supabaseAdmin
+      .from("bills_pay_billers")
+      .select("country_code")
+      .eq("is_active", true)
+      .order("country_code", { ascending: true });
+
+    if (countriesError) {
+      console.error("GET /api/bills-pay/catalog countries error:", countriesError);
+      return jsonError("Unable to load supported bills-pay countries.", 500);
+    }
+
+    const supportedCountries = Array.from(
+      new Set(
+        (countries ?? [])
+          .map((row) => readString((row as { country_code?: unknown }).country_code))
+          .filter((value): value is string => Boolean(value))
+      )
+    );
+
     return NextResponse.json({
       categories: categories ?? [],
       billers: billers ?? [],
+      countries: supportedCountries,
     });
   } catch (error) {
     console.error("GET /api/bills-pay/catalog error:", error);
