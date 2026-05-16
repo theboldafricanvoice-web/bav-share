@@ -13,6 +13,17 @@ export async function GET(request: Request) {
     const countryCode = readString(searchParams.get("countryCode"));
     const networkId = readString(searchParams.get("networkId"));
 
+    const { data: countryRows, error: countriesError } = await auth.supabaseAdmin
+      .from("data_topup_networks")
+      .select("country_code")
+      .eq("is_active", true)
+      .order("country_code", { ascending: true });
+
+    if (countriesError) {
+      console.error("GET /api/topup/catalog countries error:", countriesError);
+      return jsonError("Unable to load supported top-up countries.", 500);
+    }
+
     let networksQuery = auth.supabaseAdmin
       .from("data_topup_networks")
       .select("id, provider_id, country_code, network_code, name, is_active")
@@ -64,7 +75,17 @@ export async function GET(request: Request) {
       return jsonError("Unable to load top-up products.", 500);
     }
 
+    const countries = Array.from(
+      new Set(
+        (countryRows ?? [])
+          .map((row) => row.country_code)
+          .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          .map((value) => value.trim().toUpperCase())
+      )
+    );
+
     return NextResponse.json({
+      countries,
       networks: networks ?? [],
       products: products ?? [],
     });
