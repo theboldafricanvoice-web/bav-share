@@ -184,6 +184,36 @@ function extractItems<T>(payload: unknown): T[] {
   return [];
 }
 
+function summarizeUnknownRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      type: Array.isArray(value) ? "array" : typeof value,
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const sample: Record<string, unknown> = {};
+
+  for (const key of keys.slice(0, 8)) {
+    const fieldValue = record[key];
+    sample[key] =
+      fieldValue == null ||
+      typeof fieldValue === "string" ||
+      typeof fieldValue === "number" ||
+      typeof fieldValue === "boolean"
+        ? fieldValue
+        : Array.isArray(fieldValue)
+        ? `[array:${fieldValue.length}]`
+        : "[object]";
+  }
+
+  return {
+    keys,
+    sample,
+  };
+}
+
 function mapDingConnectProcessingState(
   state: string | null | undefined
 ): PurchaseBundleResult["providerStatus"] {
@@ -315,6 +345,8 @@ export async function syncDingConnectCatalog(params: {
     networksUpserted: 0,
     productsUpserted: 0,
     skippedProducts: [] as string[],
+    productsPayloadShape: null as Record<string, unknown> | null,
+    sampleProductShapes: [] as Array<Record<string, unknown>>,
   };
 
   for (const provider of providers) {
@@ -359,15 +391,26 @@ export async function syncDingConnectCatalog(params: {
       normalizedCountries.join(",")
     )}`
   );
+  summary.productsPayloadShape = summarizeUnknownRecord(productsPayload);
   const products = extractItems<DingConnectProduct>(productsPayload);
 
   for (const product of products) {
+    if (summary.sampleProductShapes.length < 3) {
+      summary.sampleProductShapes.push(summarizeUnknownRecord(product));
+    }
+
     const skuCode = product.SkuCode?.trim();
     const providerCode = product.ProviderCode?.trim();
     const countryCode = product.CountryIso?.trim().toUpperCase();
 
     if (!skuCode || !providerCode || !countryCode) {
-      summary.skippedProducts.push("Skipped product with missing sku/provider/country.");
+      if (summary.skippedProducts.length < 10) {
+        summary.skippedProducts.push(
+          `Skipped product with missing sku/provider/country. Keys: ${Object.keys(
+            (product as Record<string, unknown>) ?? {}
+          ).join(", ")}`
+        );
+      }
       continue;
     }
 
@@ -377,7 +420,11 @@ export async function syncDingConnectCatalog(params: {
     const receiveCurrency = product.ReceiveCurrencyIso?.trim().toUpperCase() ?? null;
 
     if (sendValue == null || sendCurrency == null || receiveValue == null) {
-      summary.skippedProducts.push(`${skuCode}: missing send/receive pricing data.`);
+      if (summary.skippedProducts.length < 10) {
+        summary.skippedProducts.push(
+          `${skuCode}: missing send/receive pricing data.`
+        );
+      }
       continue;
     }
 
@@ -387,7 +434,11 @@ export async function syncDingConnectCatalog(params: {
         : true;
 
     if (!isFixed) {
-      summary.skippedProducts.push(`${skuCode}: variable denomination product skipped for now.`);
+      if (summary.skippedProducts.length < 10) {
+        summary.skippedProducts.push(
+          `${skuCode}: variable denomination product skipped for now.`
+        );
+      }
       continue;
     }
 
