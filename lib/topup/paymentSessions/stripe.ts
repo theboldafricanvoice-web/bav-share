@@ -22,10 +22,6 @@ export const stripeTopupPaymentProviderAdapter: TopupPaymentProviderAdapter = {
       issues.push("TOPUP_STRIPE_CANCEL_URL");
     }
 
-    if (!process.env.STRIPE_WEBHOOK_SECRET?.trim()) {
-      issues.push("TOPUP_STRIPE_WEBHOOK_SECRET");
-    }
-
     return {
       ready: issues.length === 0,
       issues,

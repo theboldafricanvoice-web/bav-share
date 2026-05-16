@@ -15,16 +15,18 @@ To enable the real Stripe path, configure:
 
 - `BILLS_PAY_DEFAULT_PAYMENT_PROVIDER=stripe`
 - `STRIPE_SECRET_KEY=...`
-- `BILLS_PAY_STRIPE_WEBHOOK_SECRET=...`
 - `BILLS_PAY_STRIPE_SUCCESS_URL=https://your-app-or-web-return-url`
 - `BILLS_PAY_STRIPE_CANCEL_URL=https://your-app-or-cancel-url`
+- `BILLS_PAY_STRIPE_WEBHOOK_SECRET=...`
+  - required for webhook verification after checkout
 
 For BAV Top-Up, also configure:
 
 - `TOPUP_DEFAULT_PAYMENT_PROVIDER=stripe`
-- `TOPUP_STRIPE_WEBHOOK_SECRET=...`
 - `TOPUP_STRIPE_SUCCESS_URL=https://your-app-or-web-return-url`
 - `TOPUP_STRIPE_CANCEL_URL=https://your-app-or-cancel-url`
+- `TOPUP_STRIPE_WEBHOOK_SECRET=...`
+  - required for webhook verification after checkout
 
 ## Important Notes
 
