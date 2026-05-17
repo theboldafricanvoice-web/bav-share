@@ -1,4 +1,24 @@
 const TOPUP_PROVIDER_PRIORITY = ["reloadly", "dingconnect", "manual"] as const;
+const TOPUP_NETWORK_NOISE_TOKENS = [
+  "sierraleone",
+  "sierra",
+  "leone",
+  "sl",
+  "nigeria",
+  "ng",
+  "liberia",
+  "lr",
+  "guinea",
+  "gn",
+  "gambia",
+  "gm",
+  "ghana",
+  "gh",
+  "kenya",
+  "ke",
+  "mobile",
+  "network",
+] as const;
 
 export function getTopupProviderPriority(providerCode: string | null | undefined) {
   const normalized = providerCode?.trim().toLowerCase() ?? "";
@@ -16,5 +36,14 @@ export function compareTopupProviderPriority(
 }
 
 export function normalizeTopupComparableText(value: string | null | undefined) {
-  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const collapsed = (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  if (!collapsed) return "";
+
+  let normalized = collapsed;
+  for (const token of TOPUP_NETWORK_NOISE_TOKENS) {
+    normalized = normalized.replaceAll(token, "");
+  }
+
+  return normalized || collapsed;
 }
