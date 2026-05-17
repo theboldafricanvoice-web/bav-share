@@ -229,7 +229,7 @@ function buildReloadlyRecipientPhone(input: {
     if (rawDigits.startsWith(dialCode) && rawDigits.length > dialCode.length) {
       return {
         countryCode: isoCountryCode,
-        number: rawDigits.slice(dialCode.length),
+        number: `+${rawDigits}`,
       };
     }
   }
@@ -239,7 +239,7 @@ function buildReloadlyRecipientPhone(input: {
     if (localNumber.length >= 6) {
       return {
         countryCode: isoCountryCode,
-        number: localNumber,
+        number: `+${dialCodeCandidates[0]}${localNumber}`,
       };
     }
   }
