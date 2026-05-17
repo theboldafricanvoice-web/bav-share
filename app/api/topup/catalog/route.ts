@@ -1,4 +1,5 @@
 import { authenticateTopupRequest } from "@/lib/topup/auth";
+import { isTopupProductAllowedByCatalogRules } from "@/lib/topup/catalogRules";
 import {
   compareTopupProviderPriority,
   normalizeTopupComparableText,
@@ -123,8 +124,20 @@ export async function GET(request: Request) {
       return jsonError("Unable to load top-up products.", 500);
     }
 
-    const preferredProducts = (products ?? []).filter((product) =>
-      allowedNetworkIds.has(product.network_id)
+    const preferredProducts = (products ?? []).filter(
+      (product) =>
+        allowedNetworkIds.has(product.network_id) &&
+        isTopupProductAllowedByCatalogRules({
+          currency: product.currency,
+          retailPrice: product.retail_price,
+          countryCode:
+            preferredNetworks.find((network) => network.id === product.network_id)?.country_code ?? null,
+        })
+    );
+
+    const allowedProductNetworkIds = new Set(preferredProducts.map((product) => product.network_id));
+    const visibleNetworks = preferredNetworks.filter((network) =>
+      allowedProductNetworkIds.has(network.id)
     );
 
     const countries = Array.from(
@@ -138,7 +151,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       countries,
-      networks: preferredNetworks,
+      networks: visibleNetworks,
       products: preferredProducts,
     });
   } catch (error) {

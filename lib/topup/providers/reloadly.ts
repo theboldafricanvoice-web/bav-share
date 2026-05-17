@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createHmac, timingSafeEqual } from "crypto";
+import { isTopupProductAllowedByCatalogRules } from "@/lib/topup/catalogRules";
 import type {
   FulfillmentStatusResult,
   PurchaseBundleInput,
@@ -597,7 +598,13 @@ export async function syncReloadlyCatalog(params: {
               cost_price: null,
               data_volume_label: null,
               validity_label: null,
-              is_active: activate,
+              is_active:
+                activate &&
+                isTopupProductAllowedByCatalogRules({
+                  countryCode,
+                  currency,
+                  retailPrice: amount,
+                }),
               provider_metadata: {
                 source: "reloadly",
                 operatorId,

@@ -1,4 +1,5 @@
 import { authenticateTopupRequest } from "@/lib/topup/auth";
+import { isTopupProductAllowedByCatalogRules } from "@/lib/topup/catalogRules";
 import {
   compareTopupProviderPriority,
   normalizeTopupComparableText,
@@ -115,6 +116,19 @@ export async function POST(request: Request) {
 
     if (!network) {
       return jsonError("Selected top-up network was not found.", 404);
+    }
+
+    if (
+      !isTopupProductAllowedByCatalogRules({
+        countryCode: network.country_code,
+        currency: product.currency,
+        retailPrice: product.retail_price,
+      })
+    ) {
+      return jsonError(
+        "Selected top-up amount is no longer available for this country. Please choose SLE 40 or higher.",
+        400
+      );
     }
 
     const selectedProviderCode = readProviderCode(product as any);

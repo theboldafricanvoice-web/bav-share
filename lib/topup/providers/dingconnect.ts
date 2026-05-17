@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isTopupProductAllowedByCatalogRules } from "@/lib/topup/catalogRules";
 import type {
   FulfillmentStatusResult,
   PurchaseBundleInput,
