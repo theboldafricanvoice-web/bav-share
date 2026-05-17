@@ -498,37 +498,7 @@ export async function executeQueuedTopupOrder(params: {
 }) {
   const { supabaseAdmin } = params;
 
-  let orderQuery = supabaseAdmin
-    .from("data_topup_orders")
-    .select(`
-      id,
-      order_ref,
-      provider_id,
-      recipient_msisdn,
-      country_code,
-      currency,
-      sale_amount,
-      status,
-      payment_status,
-      fulfillment_status,
-      locked_product_snapshot
-    `)
-    .in("status", ["fulfillment_queued", "processing_topup", "payment_verified", "paid"])
-    .eq("payment_status", "verified")
-    .order("created_at", { ascending: true })
-    .limit(1);
-
-  if (params.orderId) {
-    orderQuery = orderQuery.eq("id", params.orderId);
-  }
-
-  const { data: orders, error: orderLookupError } = await orderQuery;
-
-  if (orderLookupError) {
-    throw new Error("Unable to load queued top-up order.");
-  }
-
-  const order = (orders ?? [])[0] as
+  let order: 
     | {
         id: string;
         order_ref: string;
@@ -544,294 +514,352 @@ export async function executeQueuedTopupOrder(params: {
       }
     | undefined;
 
-  if (!order) {
-    return {
-      ok: false as const,
-      reason: "No queued top-up order was available.",
-    };
-  }
+  try {
+    let orderQuery = supabaseAdmin
+      .from("data_topup_orders")
+      .select(`
+        id,
+        order_ref,
+        provider_id,
+        recipient_msisdn,
+        country_code,
+        currency,
+        sale_amount,
+        status,
+        payment_status,
+        fulfillment_status,
+        locked_product_snapshot
+      `)
+      .in("status", ["fulfillment_queued", "processing_topup", "payment_verified", "paid"])
+      .eq("payment_status", "verified")
+      .order("created_at", { ascending: true })
+      .limit(1);
 
-  if (isProcessingTopupState(order.status) && order.fulfillment_status === "in_progress") {
-    return {
-      ok: false as const,
-      reason: "Top-up order is already being processed.",
-    };
-  }
+    if (params.orderId) {
+      orderQuery = orderQuery.eq("id", params.orderId);
+    }
 
-  const snapshot = order.locked_product_snapshot ?? {};
-  const primaryContext = buildPurchaseContextFromSnapshot({
-    snapshot,
-    order,
-  });
-  const fallbackContexts = Array.isArray(snapshot.fallbackCandidates)
-    ? snapshot.fallbackCandidates
-        .map((value) => buildPurchaseContextFromFallbackCandidate(value, order))
-        .filter((value): value is PurchaseContext => Boolean(value))
-    : [];
-  const purchaseContexts = [primaryContext, ...fallbackContexts].filter(
-    (value): value is PurchaseContext => Boolean(value)
-  );
+    const { data: orders, error: orderLookupError } = await orderQuery;
 
-  if (purchaseContexts.length === 0) {
-    await markOrderAsFulfillmentFailed({
-      supabaseAdmin,
-      orderId: order.id,
-      failureCode: "invalid_provider_snapshot",
-      failureMessage:
-        "Queued top-up order is missing required provider snapshot fields.",
+    if (orderLookupError) {
+      throw new Error("Unable to load queued top-up order.");
+    }
+
+    order = (orders ?? [])[0] as typeof order | undefined;
+
+    if (!order) {
+      return {
+        ok: false as const,
+        reason: "No queued top-up order was available.",
+      };
+    }
+
+    const currentOrder = order;
+
+    if (
+      isProcessingTopupState(currentOrder.status) &&
+      currentOrder.fulfillment_status === "in_progress"
+    ) {
+      return {
+        ok: false as const,
+        reason: "Top-up order is already being processed.",
+      };
+    }
+
+    const snapshot = currentOrder.locked_product_snapshot ?? {};
+    const primaryContext = buildPurchaseContextFromSnapshot({
+      snapshot,
+      order: currentOrder,
     });
-
-    throw new Error("Queued top-up order is missing required provider snapshot fields.");
-  }
-
-  const { data: existingAttempts, error: attemptsLookupError } = await supabaseAdmin
-    .from("data_topup_fulfillment_attempts")
-    .select("id, attempt_no")
-    .eq("order_id", order.id)
-    .order("attempt_no", { ascending: false })
-    .limit(1);
-
-  if (attemptsLookupError) {
-    throw new Error("Unable to load prior top-up fulfillment attempts.");
-  }
-
-  const lastAttemptNo = Number((existingAttempts ?? [])[0]?.attempt_no ?? 0);
-  let nextAttemptNo = lastAttemptNo + 1;
-
-  for (let index = 0; index < purchaseContexts.length; index += 1) {
-    const context = purchaseContexts[index];
-    const isLastContext = index === purchaseContexts.length - 1;
-    const adapter = getTopupAggregatorAdapter(context.providerCode);
-
-    if (!adapter) {
-      if (isLastContext) {
-        await markOrderAsFulfillmentFailed({
-          supabaseAdmin,
-          orderId: order.id,
-          failureCode: "provider_not_configured",
-          failureMessage: `No top-up aggregator adapter is configured for ${context.providerCode}.`,
-          payload: {
-            providerCode: context.providerCode,
-          },
-        });
-        throw new Error(
-          `No top-up aggregator adapter is configured for ${context.providerCode}.`
-        );
-      }
-      continue;
-    }
-
-    if (!context.providerId) {
-      if (isLastContext) {
-        await markOrderAsFulfillmentFailed({
-          supabaseAdmin,
-          orderId: order.id,
-          failureCode: "provider_missing_id",
-          failureMessage: `Top-up fallback provider ${context.providerCode} is missing a provider id.`,
-          payload: {
-            providerCode: context.providerCode,
-          },
-        });
-        throw new Error(
-          `Top-up fallback provider ${context.providerCode} is missing a provider id.`
-        );
-      }
-      continue;
-    }
-
-    const attemptNo = nextAttemptNo;
-    nextAttemptNo += 1;
-    const providerRequestRef = buildProviderRequestRef();
-    const idempotencyKey = buildIdempotencyKey(
-      `topup-${order.id}-${context.providerCode}-${attemptNo}`
+    const fallbackContexts = Array.isArray(snapshot.fallbackCandidates)
+      ? snapshot.fallbackCandidates
+          .map((value) => buildPurchaseContextFromFallbackCandidate(value, currentOrder))
+          .filter((value): value is PurchaseContext => Boolean(value))
+      : [];
+    const purchaseContexts = [primaryContext, ...fallbackContexts].filter(
+      (value): value is PurchaseContext => Boolean(value)
     );
 
-    const { data: attempt, error: attemptInsertError } = await supabaseAdmin
+    if (purchaseContexts.length === 0) {
+      await markOrderAsFulfillmentFailed({
+        supabaseAdmin,
+        orderId: currentOrder.id,
+        failureCode: "invalid_provider_snapshot",
+        failureMessage:
+          "Queued top-up order is missing required provider snapshot fields.",
+      });
+
+      throw new Error("Queued top-up order is missing required provider snapshot fields.");
+    }
+
+    const { data: existingAttempts, error: attemptsLookupError } = await supabaseAdmin
       .from("data_topup_fulfillment_attempts")
-      .insert({
-        order_id: order.id,
-        provider_id: context.providerId,
-        attempt_no: attemptNo,
-        idempotency_key: idempotencyKey,
-        provider_request_ref: providerRequestRef,
-        request_payload: {
-          providerCode: context.providerCode,
+      .select("id, attempt_no")
+      .eq("order_id", currentOrder.id)
+      .order("attempt_no", { ascending: false })
+      .limit(1);
+
+    if (attemptsLookupError) {
+      throw new Error("Unable to load prior top-up fulfillment attempts.");
+    }
+
+    const lastAttemptNo = Number((existingAttempts ?? [])[0]?.attempt_no ?? 0);
+    let nextAttemptNo = lastAttemptNo + 1;
+
+    for (let index = 0; index < purchaseContexts.length; index += 1) {
+      const context = purchaseContexts[index];
+      const isLastContext = index === purchaseContexts.length - 1;
+      const adapter = getTopupAggregatorAdapter(context.providerCode);
+
+      if (!adapter) {
+        if (isLastContext) {
+          await markOrderAsFulfillmentFailed({
+            supabaseAdmin,
+            orderId: order.id,
+            failureCode: "provider_not_configured",
+            failureMessage: `No top-up aggregator adapter is configured for ${context.providerCode}.`,
+            payload: {
+              providerCode: context.providerCode,
+            },
+          });
+          throw new Error(
+            `No top-up aggregator adapter is configured for ${context.providerCode}.`
+          );
+        }
+        continue;
+      }
+
+      if (!context.providerId) {
+        if (isLastContext) {
+          await markOrderAsFulfillmentFailed({
+            supabaseAdmin,
+            orderId: order.id,
+            failureCode: "provider_missing_id",
+            failureMessage: `Top-up fallback provider ${context.providerCode} is missing a provider id.`,
+            payload: {
+              providerCode: context.providerCode,
+            },
+          });
+          throw new Error(
+            `Top-up fallback provider ${context.providerCode} is missing a provider id.`
+          );
+        }
+        continue;
+      }
+
+      const attemptNo = nextAttemptNo;
+      nextAttemptNo += 1;
+      const providerRequestRef = buildProviderRequestRef();
+      const idempotencyKey = buildIdempotencyKey(
+        `topup-${order.id}-${context.providerCode}-${attemptNo}`
+      );
+
+      const { data: attempt, error: attemptInsertError } = await supabaseAdmin
+        .from("data_topup_fulfillment_attempts")
+        .insert({
+          order_id: order.id,
+          provider_id: context.providerId,
+          attempt_no: attemptNo,
+          idempotency_key: idempotencyKey,
+          provider_request_ref: providerRequestRef,
+          request_payload: {
+            providerCode: context.providerCode,
+            orderRef: order.order_ref,
+            recipientMsisdn: order.recipient_msisdn,
+            countryCode: context.countryCode ?? order.country_code,
+            networkCode: context.networkCode,
+            providerProductCode: context.providerProductCode,
+            amount: context.amount,
+            currency: context.currency,
+          },
+          status: "queued",
+        })
+        .select("id, attempt_no, provider_request_ref")
+        .single();
+
+      if (attemptInsertError || !attempt) {
+        throw new Error("Unable to create top-up fulfillment attempt.");
+      }
+
+      try {
+        const purchaseResult = await adapter.purchaseBundle({
           orderRef: order.order_ref,
+          providerRequestRef,
           recipientMsisdn: order.recipient_msisdn,
           countryCode: context.countryCode ?? order.country_code,
           networkCode: context.networkCode,
           providerProductCode: context.providerProductCode,
-          amount: context.amount,
+          amount: Number(context.amount),
           currency: context.currency,
-        },
-        status: "queued",
-      })
-      .select("id, attempt_no, provider_request_ref")
-      .single();
-
-    if (attemptInsertError || !attempt) {
-      throw new Error("Unable to create top-up fulfillment attempt.");
-    }
-
-    try {
-      const purchaseResult = await adapter.purchaseBundle({
-        orderRef: order.order_ref,
-        providerRequestRef,
-        recipientMsisdn: order.recipient_msisdn,
-        countryCode: context.countryCode ?? order.country_code,
-        networkCode: context.networkCode,
-        providerProductCode: context.providerProductCode,
-        amount: Number(context.amount),
-        currency: context.currency,
-      });
-
-      if (purchaseResult.providerStatus === "failed" && !isLastContext) {
-        await markFulfillmentAttemptFailed({
-          supabaseAdmin,
-          attemptId: attempt.id,
-          providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-          failureCode: "provider_failed",
-          failureMessage:
-            purchaseResult.providerMessage ??
-            `Provider ${context.providerCode} failed before fallback.`,
-          raw: purchaseResult.raw,
         });
 
-        const { error: fallbackEventError } = await supabaseAdmin
+        if (purchaseResult.providerStatus === "failed" && !isLastContext) {
+          await markFulfillmentAttemptFailed({
+            supabaseAdmin,
+            attemptId: attempt.id,
+            providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+            failureCode: "provider_failed",
+            failureMessage:
+              purchaseResult.providerMessage ??
+              `Provider ${context.providerCode} failed before fallback.`,
+            raw: purchaseResult.raw,
+          });
+
+          const { error: fallbackEventError } = await supabaseAdmin
+            .from("data_topup_order_events")
+            .insert({
+              order_id: order.id,
+              actor_type: "system",
+              event_type: "fulfillment_fallback_triggered",
+              message:
+                purchaseResult.providerMessage ??
+                `Falling back after ${context.providerCode} fulfillment failure.`,
+              payload: {
+                attemptNo,
+                providerCode: context.providerCode,
+                providerRequestRef,
+                providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+                nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+              },
+            });
+
+          if (fallbackEventError) {
+            console.error(
+              "executeQueuedTopupOrder fallback event insert error:",
+              fallbackEventError
+            );
+          }
+
+          continue;
+        }
+
+        const mappedStatus = await applyFulfillmentStatusToAttemptAndOrder({
+          supabaseAdmin,
+          orderId: order.id,
+          attemptId: attempt.id,
+          providerStatusResult: {
+            providerStatus:
+              purchaseResult.providerStatus === "accepted"
+                ? "pending"
+                : purchaseResult.providerStatus,
+            providerRequestRef,
+            providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
+            providerMessage: purchaseResult.providerMessage ?? null,
+            raw: purchaseResult.raw,
+          },
+        });
+
+        const { error: eventError } = await supabaseAdmin
           .from("data_topup_order_events")
           .insert({
             order_id: order.id,
             actor_type: "system",
-            event_type: "fulfillment_fallback_triggered",
+            event_type: "fulfillment_submitted",
             message:
               purchaseResult.providerMessage ??
-              `Falling back after ${context.providerCode} fulfillment failure.`,
+              "Top-up fulfillment request was sent to the provider.",
             payload: {
               attemptNo,
               providerCode: context.providerCode,
               providerRequestRef,
               providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-              nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+              providerStatus: purchaseResult.providerStatus,
             },
           });
 
-        if (fallbackEventError) {
-          console.error(
-            "executeQueuedTopupOrder fallback event insert error:",
-            fallbackEventError
-          );
+        if (eventError) {
+          console.error("executeQueuedTopupOrder event insert error:", eventError);
         }
 
-        continue;
-      }
-
-      const mappedStatus = await applyFulfillmentStatusToAttemptAndOrder({
-        supabaseAdmin,
-        orderId: order.id,
-        attemptId: attempt.id,
-        providerStatusResult: {
-          providerStatus:
-            purchaseResult.providerStatus === "accepted"
-              ? "pending"
-              : purchaseResult.providerStatus,
-          providerRequestRef,
-          providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-          providerMessage: purchaseResult.providerMessage ?? null,
-          raw: purchaseResult.raw,
-        },
-      });
-
-      const { error: eventError } = await supabaseAdmin
-        .from("data_topup_order_events")
-        .insert({
-          order_id: order.id,
-          actor_type: "system",
-          event_type: "fulfillment_submitted",
-          message:
-            purchaseResult.providerMessage ??
-            "Top-up fulfillment request was sent to the provider.",
-          payload: {
-            attemptNo,
-            providerCode: context.providerCode,
-            providerRequestRef,
-            providerTransactionRef: purchaseResult.providerTransactionRef ?? null,
-            providerStatus: purchaseResult.providerStatus,
-          },
-        });
-
-      if (eventError) {
-        console.error("executeQueuedTopupOrder event insert error:", eventError);
-      }
-
-      return {
-        ok: true as const,
-        orderId: order.id,
-        orderRef: order.order_ref,
-        attemptId: attempt.id,
-        attemptNo,
-        providerCode: context.providerCode,
-        providerStatus: purchaseResult.providerStatus,
-        fulfillmentStatus: mappedStatus.fulfillment_status,
-      };
-    } catch (error) {
-      if (!isLastContext) {
-        await markFulfillmentAttemptFailed({
-          supabaseAdmin,
+        return {
+          ok: true as const,
+          orderId: order.id,
+          orderRef: order.order_ref,
           attemptId: attempt.id,
-          failureCode: "provider_error",
-          failureMessage:
-            error instanceof Error
-              ? error.message
-              : `Provider ${context.providerCode} threw an unknown error.`,
-          raw: {
-            providerCode: context.providerCode,
-            error: error instanceof Error ? error.message : "Unknown provider error",
-          },
-        });
-
-        const { error: fallbackEventError } = await supabaseAdmin
-          .from("data_topup_order_events")
-          .insert({
-            order_id: order.id,
-            actor_type: "system",
-            event_type: "fulfillment_fallback_triggered",
-            message:
+          attemptNo,
+          providerCode: context.providerCode,
+          providerStatus: purchaseResult.providerStatus,
+          fulfillmentStatus: mappedStatus.fulfillment_status,
+        };
+      } catch (error) {
+        if (!isLastContext) {
+          await markFulfillmentAttemptFailed({
+            supabaseAdmin,
+            attemptId: attempt.id,
+            failureCode: "provider_error",
+            failureMessage:
               error instanceof Error
                 ? error.message
-                : `Falling back after ${context.providerCode} error.`,
-            payload: {
-              attemptNo,
+                : `Provider ${context.providerCode} threw an unknown error.`,
+            raw: {
               providerCode: context.providerCode,
-              providerRequestRef,
-              nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+              error: error instanceof Error ? error.message : "Unknown provider error",
             },
           });
 
-        if (fallbackEventError) {
-          console.error(
-            "executeQueuedTopupOrder fallback error event insert error:",
-            fallbackEventError
-          );
+          const { error: fallbackEventError } = await supabaseAdmin
+            .from("data_topup_order_events")
+            .insert({
+              order_id: order.id,
+              actor_type: "system",
+              event_type: "fulfillment_fallback_triggered",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : `Falling back after ${context.providerCode} error.`,
+              payload: {
+                attemptNo,
+                providerCode: context.providerCode,
+                providerRequestRef,
+                nextProviderCode: purchaseContexts[index + 1]?.providerCode ?? null,
+              },
+            });
+
+          if (fallbackEventError) {
+            console.error(
+              "executeQueuedTopupOrder fallback error event insert error:",
+              fallbackEventError
+            );
+          }
+
+          continue;
         }
 
-        continue;
+        throw error;
       }
-
-      throw error;
     }
+
+    await markOrderAsFulfillmentFailed({
+      supabaseAdmin,
+      orderId: order.id,
+      failureCode: "no_provider_accepted",
+      failureMessage: "No top-up provider was able to accept this fulfillment request.",
+      payload: {
+        providerCodesTried: purchaseContexts.map((context) => context.providerCode),
+      },
+    });
+
+    throw new Error("No top-up provider was able to accept this fulfillment request.");
+  } catch (error) {
+    if (order?.id) {
+      await markOrderAsFulfillmentFailed({
+        supabaseAdmin,
+        orderId: order.id,
+        failureCode: "fulfillment_dispatch_error",
+        failureMessage:
+          error instanceof Error
+            ? error.message
+            : "Unhandled fulfillment dispatch error.",
+        payload: {
+          orderRef: order.order_ref,
+        },
+      }).catch((markError) => {
+        console.error("executeQueuedTopupOrder final failure marking error:", markError);
+      });
+    }
+
+    throw error;
   }
-
-  await markOrderAsFulfillmentFailed({
-    supabaseAdmin,
-    orderId: order.id,
-    failureCode: "no_provider_accepted",
-    failureMessage: "No top-up provider was able to accept this fulfillment request.",
-    payload: {
-      providerCodesTried: purchaseContexts.map((context) => context.providerCode),
-    },
-  });
-
-  throw new Error("No top-up provider was able to accept this fulfillment request.");
 }
 
 export async function reconcileTopupFulfillmentAttempt(params: {
