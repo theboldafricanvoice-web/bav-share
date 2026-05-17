@@ -146,7 +146,7 @@ async function markFulfillmentAttemptFailed(params: {
   }
 }
 
-async function markOrderAsFulfillmentFailed(params: {
+export async function markOrderAsFulfillmentFailed(params: {
   supabaseAdmin: SupabaseClient;
   orderId: string;
   failureMessage: string;
@@ -189,6 +189,114 @@ async function markOrderAsFulfillmentFailed(params: {
   if (eventError) {
     console.error("markOrderAsFulfillmentFailed event insert error:", eventError);
   }
+}
+
+export async function cleanupStaleTopupOrders(params: {
+  supabaseAdmin: SupabaseClient;
+  olderThanMinutes?: number;
+}) {
+  const { supabaseAdmin } = params;
+  const olderThanMinutes = Math.max(1, Math.floor(params.olderThanMinutes ?? 60));
+  const beforeIso = new Date(Date.now() - olderThanMinutes * 60_000).toISOString();
+
+  const { data: orders, error: ordersLookupError } = await supabaseAdmin
+    .from("data_topup_orders")
+    .select(`
+      id,
+      order_ref,
+      status,
+      payment_status,
+      fulfillment_status,
+      created_at
+    `)
+    .eq("payment_status", "verified")
+    .in("status", ["processing_topup", "payment_verified", "paid"])
+    .lt("created_at", beforeIso)
+    .order("created_at", { ascending: true });
+
+  if (ordersLookupError) {
+    throw new Error("Unable to load stale top-up orders for cleanup.");
+  }
+
+  const summary = {
+    olderThanMinutes,
+    beforeIso,
+    candidatesFound: (orders ?? []).length,
+    reconciled: [] as string[],
+    failed: [] as string[],
+    skipped: [] as string[],
+  };
+
+  for (const order of orders ?? []) {
+    const orderId = String((order as Record<string, unknown>).id ?? "");
+    const orderRef = String((order as Record<string, unknown>).order_ref ?? orderId);
+
+    const { data: attempts, error: attemptsLookupError } = await supabaseAdmin
+      .from("data_topup_fulfillment_attempts")
+      .select(`
+        id,
+        provider_request_ref,
+        provider_transaction_ref,
+        status
+      `)
+      .eq("order_id", orderId)
+      .order("attempt_no", { ascending: false });
+
+    if (attemptsLookupError) {
+      summary.skipped.push(`${orderRef}: unable to inspect fulfillment attempts.`);
+      continue;
+    }
+
+    const hasReconcilableAttempt = (attempts ?? []).some((attempt) => {
+      const attemptStatus = String((attempt as Record<string, unknown>).status ?? "");
+      const providerRequestRef = readStringValue(
+        (attempt as Record<string, unknown>).provider_request_ref
+      );
+      const providerTransactionRef = readStringValue(
+        (attempt as Record<string, unknown>).provider_transaction_ref
+      );
+
+      return (
+        ["accepted", "submitted", "unknown"].includes(attemptStatus) &&
+        Boolean(providerRequestRef || providerTransactionRef)
+      );
+    });
+
+    if (hasReconcilableAttempt) {
+      try {
+        const reconciliationResult = await reconcileTopupFulfillmentAttempt({
+          supabaseAdmin,
+          orderId,
+        });
+
+        if (reconciliationResult.ok) {
+          summary.reconciled.push(orderRef);
+          continue;
+        }
+      } catch (error) {
+        console.error("cleanupStaleTopupOrders reconciliation error:", {
+          orderRef,
+          error,
+        });
+      }
+    }
+
+    await markOrderAsFulfillmentFailed({
+      supabaseAdmin,
+      orderId,
+      failureCode: "stale_processing_cleanup",
+      failureMessage:
+        "This top-up order was cleaned up after remaining stuck in processing without a completed provider result.",
+      payload: {
+        cleanupReason: "stale_processing_cleanup",
+        olderThanMinutes,
+      },
+    });
+
+    summary.failed.push(orderRef);
+  }
+
+  return summary;
 }
 
 export async function queueTopupOrderForFulfillment(params: {
