@@ -35,6 +35,39 @@ function readProviderName(record: any) {
     : record?.data_topup_providers?.name ?? null;
 }
 
+function calculateFallbackProductScore(params: {
+  selectedProduct: {
+    face_value: number | null;
+    retail_price: number | null;
+  };
+  selectedNetworkName: string;
+  candidate: any;
+}) {
+  const { selectedProduct, selectedNetworkName, candidate } = params;
+  const candidateNetwork = Array.isArray(candidate.data_topup_networks)
+    ? candidate.data_topup_networks[0] ?? null
+    : candidate.data_topup_networks ?? null;
+
+  const selectedName = normalizeTopupComparableText(selectedNetworkName);
+  const candidateName = normalizeTopupComparableText(candidateNetwork?.name ?? "");
+
+  if (!selectedName || !candidateName) return Number.POSITIVE_INFINITY;
+  if (!candidateName.includes(selectedName) && !selectedName.includes(candidateName)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const selectedRetail = Number(selectedProduct.retail_price ?? 0);
+  const selectedFace = Number(selectedProduct.face_value ?? 0);
+  const candidateRetail = Number(candidate.retail_price ?? 0);
+  const candidateFace = Number(candidate.face_value ?? 0);
+
+  const retailDiff = Math.abs(candidateRetail - selectedRetail);
+  const faceDiff = Math.abs(candidateFace - selectedFace);
+  const exactNameBonus = candidateName === selectedName ? 0 : 0.25;
+
+  return retailDiff * 1000 + faceDiff + exactNameBonus;
+}
+
 export async function POST(request: Request) {
   try {
     const auth = await authenticateTopupRequest(request);
@@ -164,9 +197,7 @@ export async function POST(request: Request) {
       `)
       .eq("is_active", true)
       .eq("product_type", product.product_type ?? "data_bundle")
-      .eq("currency", product.currency)
-      .eq("face_value", product.face_value)
-      .eq("retail_price", product.retail_price);
+      .eq("currency", product.currency);
 
     if (fallbackProductsError) {
       console.error("POST /api/topup/orders fallback lookup error:", fallbackProductsError);
@@ -182,14 +213,30 @@ export async function POST(request: Request) {
         const candidateProviderCode = readProviderCode(candidate);
         return (
           candidateNetwork?.country_code === network.country_code &&
-          candidateProviderCode !== selectedProviderCode &&
-          normalizeTopupComparableText(candidateNetwork?.name ?? "") ===
-            normalizeTopupComparableText(network.name)
+          candidateProviderCode !== selectedProviderCode
         );
       })
-      .sort((left: any, right: any) =>
-        compareTopupProviderPriority(readProviderCode(left), readProviderCode(right))
-      )
+      .map((candidate: any) => ({
+        candidate,
+        score: calculateFallbackProductScore({
+          selectedProduct: {
+            face_value: product.face_value,
+            retail_price: product.retail_price,
+          },
+          selectedNetworkName: network.name,
+          candidate,
+        }),
+      }))
+      .filter((entry) => Number.isFinite(entry.score))
+      .sort((left, right) => {
+        const providerPriorityDiff = compareTopupProviderPriority(
+          readProviderCode(left.candidate),
+          readProviderCode(right.candidate)
+        );
+        if (providerPriorityDiff !== 0) return providerPriorityDiff;
+        return left.score - right.score;
+      })
+      .map((entry) => entry.candidate)
       .map((candidate: any) => {
         const candidateNetwork = Array.isArray(candidate.data_topup_networks)
           ? candidate.data_topup_networks[0] ?? null
