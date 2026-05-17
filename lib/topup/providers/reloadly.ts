@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHmac, timingSafeEqual } from "crypto";
 import type {
   FulfillmentStatusResult,
   PurchaseBundleInput,
@@ -60,6 +61,24 @@ let reloadlyTokenCache: ReloadlyTokenCache | null = null;
 function readTrimmedEnv(name: string) {
   const value = process.env[name]?.trim();
   return value ? value : null;
+}
+
+function readNestedString(
+  value: unknown,
+  path: Array<string | number>
+): string | null {
+  let current: unknown = value;
+
+  for (const segment of path) {
+    if (!current || typeof current !== "object") return null;
+    current = (current as Record<string | number, unknown>)[segment];
+  }
+
+  return typeof current === "string" && current.trim() ? current.trim() : null;
+}
+
+function getReloadlyWebhookSecret() {
+  return readTrimmedEnv("TOPUP_RELOADLY_WEBHOOK_SECRET");
 }
 
 function getReloadlyEnvironment(): ReloadlyEnvironment {
@@ -221,6 +240,96 @@ function mapReloadlyStatusForFulfillment(
 ): FulfillmentStatusResult["providerStatus"] {
   const mapped = mapReloadlyStatus(status);
   return mapped === "accepted" ? "pending" : mapped;
+}
+
+function normalizeReloadlySignature(signature: string) {
+  const trimmed = signature.trim();
+  const prefixedMatch = trimmed.match(/^[a-z0-9_-]+=([A-Za-z0-9+/=]+)$/i);
+  return prefixedMatch?.[1]?.trim() || trimmed;
+}
+
+function constantTimeMatches(left: string, right: string) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function verifyReloadlyWebhookSignature(params: {
+  rawBody: string;
+  requestSignature: string;
+  requestTimestamp: string;
+}) {
+  const secret = getReloadlyWebhookSecret();
+  if (!secret) {
+    throw new Error("Missing TOPUP_RELOADLY_WEBHOOK_SECRET.");
+  }
+
+  const dataToSign = `${params.rawBody}.${params.requestTimestamp}`;
+  const expectedHex = createHmac("sha256", secret).update(dataToSign).digest("hex");
+  const expectedBase64 = createHmac("sha256", secret)
+    .update(dataToSign)
+    .digest("base64");
+  const providedSignature = normalizeReloadlySignature(params.requestSignature);
+
+  return (
+    constantTimeMatches(providedSignature, expectedHex) ||
+    constantTimeMatches(providedSignature, expectedBase64)
+  );
+}
+
+function parseReloadlyWebhookPayload(
+  payload: unknown
+): FulfillmentStatusResult | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const providerStatus = mapReloadlyStatusForFulfillment(
+    readNestedString(payload, ["status"]) ??
+      readNestedString(payload, ["transaction", "status"]) ??
+      readNestedString(payload, ["data", "status"])
+  );
+
+  const providerRequestRef =
+    readNestedString(payload, ["customIdentifier"]) ??
+    readNestedString(payload, ["transaction", "customIdentifier"]) ??
+    readNestedString(payload, ["data", "customIdentifier"]) ??
+    readNestedString(payload, ["reference"]) ??
+    readNestedString(payload, ["transaction", "reference"]) ??
+    readNestedString(payload, ["data", "reference"]);
+
+  const providerTransactionRef =
+    readNestedString(payload, ["transactionId"]) ??
+    readNestedString(payload, ["transaction", "transactionId"]) ??
+    readNestedString(payload, ["data", "transactionId"]) ??
+    readNestedString(payload, ["operatorTransactionId"]) ??
+    readNestedString(payload, ["transaction", "operatorTransactionId"]) ??
+    readNestedString(payload, ["data", "operatorTransactionId"]);
+
+  const providerMessage =
+    readNestedString(payload, ["message"]) ??
+    readNestedString(payload, ["transaction", "message"]) ??
+    readNestedString(payload, ["data", "message"]) ??
+    readNestedString(payload, ["code"]) ??
+    readNestedString(payload, ["transaction", "code"]) ??
+    readNestedString(payload, ["data", "code"]);
+
+  if (!providerRequestRef && !providerTransactionRef) {
+    return null;
+  }
+
+  return {
+    providerStatus,
+    providerRequestRef,
+    providerTransactionRef,
+    providerMessage,
+    raw: payload as Record<string, unknown>,
+  };
 }
 
 function parseReloadlyOperatorId(
@@ -534,5 +643,33 @@ export const reloadlyTopupAggregatorAdapter: TopupAggregatorAdapter = {
       providerMessage: response.message ?? response.code ?? null,
       raw: response as Record<string, unknown>,
     };
+  },
+  async parseWebhook(
+    payload,
+    headers,
+    rawBody
+  ): Promise<FulfillmentStatusResult | null> {
+    const requestSignature = readTrimmedEnv("TOPUP_RELOADLY_WEBHOOK_SECRET")
+      ? headers.get("x-reloadly-signature")?.trim() ?? null
+      : null;
+    const requestTimestamp = headers
+      .get("x-reloadly-request-timestamp")
+      ?.trim();
+
+    if (!rawBody || !requestSignature || !requestTimestamp) {
+      return null;
+    }
+
+    const verified = verifyReloadlyWebhookSignature({
+      rawBody,
+      requestSignature,
+      requestTimestamp,
+    });
+
+    if (!verified) {
+      return null;
+    }
+
+    return parseReloadlyWebhookPayload(payload);
   },
 };

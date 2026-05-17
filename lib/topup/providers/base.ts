@@ -55,6 +55,7 @@ export interface TopupAggregatorAdapter {
   ): Promise<FulfillmentStatusResult>;
   parseWebhook?(
     payload: unknown,
-    headers: Headers
+    headers: Headers,
+    rawBody?: string
   ): Promise<FulfillmentStatusResult | null>;
 }

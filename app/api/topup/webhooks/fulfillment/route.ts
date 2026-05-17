@@ -29,7 +29,17 @@ function resolveProviderCode(headers: Headers, rawPayload: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const rawPayload = await request.json().catch(() => null);
+    const rawBody = await request.text();
+    let rawPayload: unknown = null;
+
+    if (rawBody) {
+      try {
+        rawPayload = JSON.parse(rawBody);
+      } catch {
+        return jsonError("Webhook payload must be valid JSON.", 400);
+      }
+    }
+
     const providerCode = resolveProviderCode(request.headers, rawPayload);
 
     if (!providerCode) {
@@ -48,7 +58,8 @@ export async function POST(request: Request) {
 
     const providerStatusResult = await adapter.parseWebhook(
       rawPayload,
-      request.headers
+      request.headers,
+      rawBody
     );
     if (!providerStatusResult) {
       return jsonError(

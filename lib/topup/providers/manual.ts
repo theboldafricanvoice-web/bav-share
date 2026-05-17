@@ -44,7 +44,11 @@ export const manualTopupAggregatorAdapter: TopupAggregatorAdapter = {
       },
     };
   },
-  async parseWebhook(payload, _headers): Promise<FulfillmentStatusResult | null> {
+  async parseWebhook(
+    payload,
+    _headers,
+    _rawBody
+  ): Promise<FulfillmentStatusResult | null> {
     if (!payload || typeof payload !== "object") return null;
 
     const maybe = payload as Record<string, unknown>;
