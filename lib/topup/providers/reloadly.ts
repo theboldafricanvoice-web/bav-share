@@ -227,7 +227,7 @@ function buildReloadlyRecipientPhone(input: {
   for (const dialCode of dialCodeCandidates) {
     if (rawDigits.startsWith(dialCode) && rawDigits.length > dialCode.length) {
       return {
-        countryCode: dialCode,
+        countryCode: isoCountryCode,
         number: rawDigits.slice(dialCode.length),
       };
     }
@@ -237,14 +237,14 @@ function buildReloadlyRecipientPhone(input: {
     const localNumber = rawDigits.replace(/^0+/, "");
     if (localNumber.length >= 6) {
       return {
-        countryCode: dialCodeCandidates[0],
+        countryCode: isoCountryCode,
         number: localNumber,
       };
     }
   }
 
   throw new Error(
-    `Reloadly could not derive a dialing code from ${input.recipientMsisdn} for ${isoCountryCode}.`
+    `Reloadly could not derive a valid local phone number from ${input.recipientMsisdn} for ${isoCountryCode}.`
   );
 }
 
