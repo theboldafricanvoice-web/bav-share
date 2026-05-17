@@ -5,6 +5,19 @@ import type {
 } from "@/lib/topup/paymentSessions/base";
 import { buildTopupPaymentRef } from "@/lib/topup/utils";
 
+function withCheckoutResultParams(
+  baseUrl: string,
+  params: Record<string, string>
+) {
+  const url = new URL(baseUrl);
+
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  return url.toString();
+}
+
 export const stripeTopupPaymentProviderAdapter: TopupPaymentProviderAdapter = {
   providerCode: "stripe",
   getReadiness() {
@@ -46,11 +59,24 @@ export const stripeTopupPaymentProviderAdapter: TopupPaymentProviderAdapter = {
 
     const paymentReference = buildTopupPaymentRef("BAV-TPAY-ST");
     const amountMinor = Math.round(Number(input.amount) * 100);
+    const successReturnUrl = withCheckoutResultParams(successUrl, {
+      checkout: "topup",
+      status: "success",
+      orderRef: input.orderRef,
+      paymentReference,
+      session_id: "{CHECKOUT_SESSION_ID}",
+    });
+    const cancelReturnUrl = withCheckoutResultParams(cancelUrl, {
+      checkout: "topup",
+      status: "cancelled",
+      orderRef: input.orderRef,
+      paymentReference,
+    });
 
     const body = new URLSearchParams({
       mode: "payment",
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      success_url: successReturnUrl,
+      cancel_url: cancelReturnUrl,
       "line_items[0][price_data][currency]": input.currency.toLowerCase(),
       "line_items[0][price_data][product_data][name]": `BAV Top-Up ${input.orderRef}`,
       "line_items[0][price_data][product_data][description]": `Top-up order ${input.orderRef}`,

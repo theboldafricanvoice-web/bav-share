@@ -1,5 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { queueTopupOrderForFulfillment } from "@/lib/topup/fulfillment";
+import {
+  executeQueuedTopupOrder,
+  queueTopupOrderForFulfillment,
+} from "@/lib/topup/fulfillment";
 import { isVerifiedTopupPaymentState } from "@/lib/topup/types";
 import { readString } from "@/lib/topup/utils";
 
@@ -69,10 +72,23 @@ export async function finalizeVerifiedTopupPayment(params: {
   }
 
   if (payment.status === "verified" && isVerifiedTopupPaymentState(order.status)) {
+    const fulfillmentResult = await executeQueuedTopupOrder({
+      supabaseAdmin,
+      orderId: order.id,
+    }).catch((error) => {
+      console.error(
+        "finalizeVerifiedTopupPayment already-verified fulfillment execution error:",
+        error
+      );
+      return null;
+    });
+
     return {
       payment,
       order,
       alreadyVerified: true,
+      queuedForFulfillment: false,
+      fulfillmentTriggered: Boolean(fulfillmentResult?.ok),
     };
   }
 
@@ -153,6 +169,14 @@ export async function finalizeVerifiedTopupPayment(params: {
     source: "payment_webhook",
   });
 
+  const fulfillmentResult = await executeQueuedTopupOrder({
+    supabaseAdmin,
+    orderId: order.id,
+  }).catch((error) => {
+    console.error("finalizeVerifiedTopupPayment fulfillment execution error:", error);
+    return null;
+  });
+
   return {
     payment,
     order:
@@ -163,6 +187,7 @@ export async function finalizeVerifiedTopupPayment(params: {
       },
     alreadyVerified: false,
     queuedForFulfillment: !queueResult.alreadyQueued,
+    fulfillmentTriggered: Boolean(fulfillmentResult?.ok),
   };
 }
 
