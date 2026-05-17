@@ -58,6 +58,16 @@ type ReloadlyTokenCache = {
 
 let reloadlyTokenCache: ReloadlyTokenCache | null = null;
 
+const COUNTRY_DIAL_CODES: Record<string, string[]> = {
+  SL: ["232"],
+  NG: ["234"],
+  LR: ["231"],
+  GN: ["224"],
+  GM: ["220"],
+  KE: ["254"],
+  GH: ["233"],
+};
+
 function readTrimmedEnv(name: string) {
   const value = process.env[name]?.trim();
   return value ? value : null;
@@ -200,6 +210,42 @@ async function reloadlyFetchJson<T>(
 
 function digitsOnly(value: string) {
   return value.replace(/[^\d]/g, "");
+}
+
+function buildReloadlyRecipientPhone(input: {
+  countryCode: string;
+  recipientMsisdn: string;
+}) {
+  const isoCountryCode = input.countryCode.trim().toUpperCase();
+  const dialCodeCandidates = COUNTRY_DIAL_CODES[isoCountryCode] ?? [];
+  const rawDigits = digitsOnly(input.recipientMsisdn);
+
+  if (!rawDigits) {
+    throw new Error("Reloadly top-up requires a valid recipient phone number.");
+  }
+
+  for (const dialCode of dialCodeCandidates) {
+    if (rawDigits.startsWith(dialCode) && rawDigits.length > dialCode.length) {
+      return {
+        countryCode: dialCode,
+        number: rawDigits.slice(dialCode.length),
+      };
+    }
+  }
+
+  if (dialCodeCandidates.length > 0) {
+    const localNumber = rawDigits.replace(/^0+/, "");
+    if (localNumber.length >= 6) {
+      return {
+        countryCode: dialCodeCandidates[0],
+        number: localNumber,
+      };
+    }
+  }
+
+  throw new Error(
+    `Reloadly could not derive a dialing code from ${input.recipientMsisdn} for ${isoCountryCode}.`
+  );
 }
 
 function coerceNumber(value: unknown): number | null {
@@ -589,6 +635,10 @@ export const reloadlyTopupAggregatorAdapter: TopupAggregatorAdapter = {
       input.providerProductCode,
       input.networkCode
     );
+    const recipientPhone = buildReloadlyRecipientPhone({
+      countryCode: input.countryCode,
+      recipientMsisdn: input.recipientMsisdn,
+    });
     const amount = Number(input.amount);
 
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -602,10 +652,7 @@ export const reloadlyTopupAggregatorAdapter: TopupAggregatorAdapter = {
         amount,
         useLocalAmount: true,
         customIdentifier: input.providerRequestRef,
-        recipientPhone: {
-          countryCode: input.countryCode.trim().toUpperCase(),
-          number: digitsOnly(input.recipientMsisdn),
-        },
+        recipientPhone,
       }),
     });
 

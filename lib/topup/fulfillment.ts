@@ -146,6 +146,51 @@ async function markFulfillmentAttemptFailed(params: {
   }
 }
 
+async function markOrderAsFulfillmentFailed(params: {
+  supabaseAdmin: SupabaseClient;
+  orderId: string;
+  failureMessage: string;
+  failureCode?: string | null;
+  payload?: Record<string, unknown>;
+}) {
+  const { supabaseAdmin } = params;
+  const nowIso = new Date().toISOString();
+  const failureCode = params.failureCode ?? "provider_failed";
+
+  const { error: orderUpdateError } = await supabaseAdmin
+    .from("data_topup_orders")
+    .update({
+      status: "topup_failed",
+      fulfillment_status: "provider_failed",
+      failed_at: nowIso,
+      failure_code: failureCode,
+      failure_message: params.failureMessage,
+      refund_status: "pending",
+    })
+    .eq("id", params.orderId);
+
+  if (orderUpdateError) {
+    throw new Error("Unable to mark top-up order as failed after fulfillment error.");
+  }
+
+  const { error: eventError } = await supabaseAdmin
+    .from("data_topup_order_events")
+    .insert({
+      order_id: params.orderId,
+      actor_type: "system",
+      event_type: "fulfillment_failed",
+      message: params.failureMessage,
+      payload: {
+        failureCode,
+        ...(params.payload ?? {}),
+      },
+    });
+
+  if (eventError) {
+    console.error("markOrderAsFulfillmentFailed event insert error:", eventError);
+  }
+}
+
 export async function queueTopupOrderForFulfillment(params: {
   supabaseAdmin: SupabaseClient;
   orderId: string;
@@ -420,6 +465,14 @@ export async function executeQueuedTopupOrder(params: {
   );
 
   if (purchaseContexts.length === 0) {
+    await markOrderAsFulfillmentFailed({
+      supabaseAdmin,
+      orderId: order.id,
+      failureCode: "invalid_provider_snapshot",
+      failureMessage:
+        "Queued top-up order is missing required provider snapshot fields.",
+    });
+
     throw new Error("Queued top-up order is missing required provider snapshot fields.");
   }
 
@@ -444,6 +497,15 @@ export async function executeQueuedTopupOrder(params: {
 
     if (!adapter) {
       if (isLastContext) {
+        await markOrderAsFulfillmentFailed({
+          supabaseAdmin,
+          orderId: order.id,
+          failureCode: "provider_not_configured",
+          failureMessage: `No top-up aggregator adapter is configured for ${context.providerCode}.`,
+          payload: {
+            providerCode: context.providerCode,
+          },
+        });
         throw new Error(
           `No top-up aggregator adapter is configured for ${context.providerCode}.`
         );
@@ -453,6 +515,15 @@ export async function executeQueuedTopupOrder(params: {
 
     if (!context.providerId) {
       if (isLastContext) {
+        await markOrderAsFulfillmentFailed({
+          supabaseAdmin,
+          orderId: order.id,
+          failureCode: "provider_missing_id",
+          failureMessage: `Top-up fallback provider ${context.providerCode} is missing a provider id.`,
+          payload: {
+            providerCode: context.providerCode,
+          },
+        });
         throw new Error(
           `Top-up fallback provider ${context.providerCode} is missing a provider id.`
         );
@@ -641,6 +712,16 @@ export async function executeQueuedTopupOrder(params: {
       throw error;
     }
   }
+
+  await markOrderAsFulfillmentFailed({
+    supabaseAdmin,
+    orderId: order.id,
+    failureCode: "no_provider_accepted",
+    failureMessage: "No top-up provider was able to accept this fulfillment request.",
+    payload: {
+      providerCodesTried: purchaseContexts.map((context) => context.providerCode),
+    },
+  });
 
   throw new Error("No top-up provider was able to accept this fulfillment request.");
 }
