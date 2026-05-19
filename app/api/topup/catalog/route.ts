@@ -56,40 +56,6 @@ export async function GET(request: Request) {
       return jsonError("Unable to load top-up networks.", 500);
     }
 
-    const preferredNetworksMap = new Map<string, any>();
-    for (const network of networks ?? []) {
-      const providerCode = Array.isArray((network as any).data_topup_providers)
-        ? (network as any).data_topup_providers[0]?.code ?? null
-        : (network as any).data_topup_providers?.code ?? null;
-      const key = `${String(network.country_code ?? "").trim().toUpperCase()}::${normalizeTopupComparableText(
-        String(network.name ?? "")
-      )}`;
-      const current = preferredNetworksMap.get(key);
-
-      if (!current) {
-        preferredNetworksMap.set(key, network);
-        continue;
-      }
-
-      const currentProviderCode = Array.isArray((current as any).data_topup_providers)
-        ? (current as any).data_topup_providers[0]?.code ?? null
-        : (current as any).data_topup_providers?.code ?? null;
-
-      if (compareTopupProviderPriority(providerCode, currentProviderCode) < 0) {
-        preferredNetworksMap.set(key, network);
-      }
-    }
-
-    const preferredNetworks = Array.from(preferredNetworksMap.values()).map((network) => ({
-      id: network.id,
-      provider_id: network.provider_id,
-      country_code: network.country_code,
-      network_code: network.network_code,
-      name: network.name,
-      is_active: network.is_active,
-    }));
-    const allowedNetworkIds = new Set(preferredNetworks.map((network) => network.id));
-
     let productsQuery = auth.supabaseAdmin
       .from("data_topup_products")
       .select(`
@@ -124,15 +90,77 @@ export async function GET(request: Request) {
       return jsonError("Unable to load top-up products.", 500);
     }
 
-    const preferredProducts = (products ?? []).filter(
-      (product) =>
-        allowedNetworkIds.has(product.network_id) &&
+    const networkRecords = (networks ?? []).map((network) => ({
+      ...network,
+      providerCode: Array.isArray((network as any).data_topup_providers)
+        ? (network as any).data_topup_providers[0]?.code ?? null
+        : (network as any).data_topup_providers?.code ?? null,
+    }));
+    const networkById = new Map(networkRecords.map((network) => [network.id, network]));
+
+    const allowedProducts = (products ?? []).filter((product) => {
+      const network = networkById.get(product.network_id);
+      return (
+        Boolean(network) &&
         isTopupProductAllowedByCatalogRules({
           currency: product.currency,
           retailPrice: product.retail_price,
-          countryCode:
-            preferredNetworks.find((network) => network.id === product.network_id)?.country_code ?? null,
+          countryCode: network?.country_code ?? null,
         })
+      );
+    });
+
+    const cheapestNetworkProductMap = new Map<string, number>();
+    for (const product of allowedProducts) {
+      const retailPrice = Number(product.retail_price ?? Number.POSITIVE_INFINITY);
+      const current = cheapestNetworkProductMap.get(product.network_id);
+      if (current == null || retailPrice < current) {
+        cheapestNetworkProductMap.set(product.network_id, retailPrice);
+      }
+    }
+
+    const preferredNetworksMap = new Map<string, any>();
+    for (const network of networkRecords) {
+      if (!cheapestNetworkProductMap.has(network.id)) continue;
+
+      const key = `${String(network.country_code ?? "").trim().toUpperCase()}::${normalizeTopupComparableText(
+        String(network.name ?? "")
+      )}`;
+      const current = preferredNetworksMap.get(key);
+
+      if (!current) {
+        preferredNetworksMap.set(key, network);
+        continue;
+      }
+
+      const currentCheapest = cheapestNetworkProductMap.get(current.id) ?? Number.POSITIVE_INFINITY;
+      const candidateCheapest =
+        cheapestNetworkProductMap.get(network.id) ?? Number.POSITIVE_INFINITY;
+
+      if (candidateCheapest < currentCheapest) {
+        preferredNetworksMap.set(key, network);
+        continue;
+      }
+
+      if (candidateCheapest === currentCheapest) {
+        if (compareTopupProviderPriority(network.providerCode, current.providerCode) < 0) {
+          preferredNetworksMap.set(key, network);
+        }
+      }
+    }
+
+    const preferredNetworks = Array.from(preferredNetworksMap.values()).map((network) => ({
+      id: network.id,
+      provider_id: network.provider_id,
+      country_code: network.country_code,
+      network_code: network.network_code,
+      name: network.name,
+      is_active: network.is_active,
+    }));
+    const allowedNetworkIds = new Set(preferredNetworks.map((network) => network.id));
+
+    const preferredProducts = allowedProducts.filter((product) =>
+      allowedNetworkIds.has(product.network_id)
     );
 
     const allowedProductNetworkIds = new Set(preferredProducts.map((product) => product.network_id));
