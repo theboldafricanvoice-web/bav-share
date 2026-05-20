@@ -248,7 +248,15 @@ async function reloadlyBillsPayFetchJson<T>(
     },
   });
 
-  const payload = (await response.json().catch(() => null)) as T | null;
+  const responseText = await response.text().catch(() => "");
+  let payload: T | null = null;
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText) as T;
+    } catch {
+      payload = null;
+    }
+  }
 
   if (!response.ok) {
     const maybeMessage =
@@ -258,7 +266,9 @@ async function reloadlyBillsPayFetchJson<T>(
         : undefined;
 
     throw new Error(
-      maybeMessage ?? `Reloadly bills-pay request failed with ${response.status}.`
+      maybeMessage ??
+        responseText?.trim() ??
+        `Reloadly bills-pay request failed with ${response.status}.`
     );
   }
 
@@ -373,6 +383,7 @@ function normalizeReloadlyBiller(
 async function fetchReloadlyBillersByCountry(countryCode: string) {
   const normalizedCountryCode = countryCode.trim().toUpperCase();
   const billers: ReloadlyBiller[] = [];
+  const skippedTypes: string[] = [];
 
   for (const type of getReloadlyCatalogTypes()) {
     const query = new URLSearchParams({
@@ -384,13 +395,26 @@ async function fetchReloadlyBillersByCountry(countryCode: string) {
       page: "0",
       size: "200",
     });
-    const response = await reloadlyBillsPayFetchJson<ReloadlyBiller[]>(
-      `/billers?${query.toString()}`
-    );
-    billers.push(...(response ?? []));
+    try {
+      const response = await reloadlyBillsPayFetchJson<ReloadlyBiller[]>(
+        `/billers?${query.toString()}`
+      );
+      billers.push(...(response ?? []));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("406")) {
+        skippedTypes.push(`${normalizedCountryCode}:${type}:${message}`);
+        continue;
+      }
+
+      throw error;
+    }
   }
 
-  return billers;
+  return {
+    billers,
+    skippedTypes,
+  };
 }
 
 async function ensureReloadlyBillsPayProviderRow(supabaseAdmin: SupabaseClient) {
@@ -478,7 +502,10 @@ export async function syncReloadlyBillsPayCatalog(params: {
   };
 
   for (const countryCode of normalizedCountries) {
-    const rawBillers = await fetchReloadlyBillersByCountry(countryCode);
+    const { billers: rawBillers, skippedTypes } =
+      await fetchReloadlyBillersByCountry(countryCode);
+
+    summary.skippedBillers.push(...skippedTypes);
 
     for (const rawBiller of rawBillers) {
       const normalized = normalizeReloadlyBiller("reloadly", rawBiller);
@@ -562,7 +589,7 @@ export const reloadlyBillsPayProviderAdapter: BillsPayProviderAdapter = {
     return Array.from(countries).sort();
   },
   async getBillersByCountry(countryCode: string): Promise<NormalizedBillsPayBiller[]> {
-    const billers = await fetchReloadlyBillersByCountry(countryCode);
+    const { billers } = await fetchReloadlyBillersByCountry(countryCode);
     return billers
       .map((biller) => normalizeReloadlyBiller("reloadly", biller))
       .filter((value): value is NormalizedBillsPayBiller => Boolean(value));
