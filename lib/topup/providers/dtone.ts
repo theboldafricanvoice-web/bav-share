@@ -218,12 +218,18 @@ async function dtOneFetch(path: string, init?: RequestInit) {
     const message =
       payload && typeof payload === "object"
         ? ((payload as Record<string, unknown>).message as string | undefined) ??
-          ((payload as Record<string, unknown>).error as string | undefined)
+          ((payload as Record<string, unknown>).error as string | undefined) ??
+          ((payload as Record<string, unknown>).detail as string | undefined)
         : typeof payload === "string"
         ? payload
         : undefined;
 
-    throw new Error(message ?? `DT One request failed with ${response.status}.`);
+    throw new Error(
+      message ??
+        (payload != null && typeof payload !== "string"
+          ? `DT One request failed with ${response.status}: ${JSON.stringify(payload)}`
+          : `DT One request failed with ${response.status}.`)
+    );
   }
 
   return payload;
@@ -434,10 +440,12 @@ async function listDtOneProductsForCountry(countryCode: string) {
     const payload = await dtOneFetch(
       `/products?country_iso_code=${encodeURIComponent(
         countryCode
-      )}&service_id=${DTONE_MOBILE_SERVICE_ID}&type=FIXED_VALUE_RECHARGE&per_page=${DTONE_PRODUCTS_PER_PAGE}&page=${page}&sort=amount,name`
+      )}&type=FIXED_VALUE_RECHARGE&per_page=${DTONE_PRODUCTS_PER_PAGE}&page=${page}`
     );
 
-    const pageItems = extractItems<DtOneProduct>(payload);
+    const pageItems = extractItems<DtOneProduct>(payload).filter(
+      (product) => coerceNumber(product.service?.id) === DTONE_MOBILE_SERVICE_ID
+    );
     if (pageItems.length === 0) break;
 
     products.push(...pageItems);
