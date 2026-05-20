@@ -1,4 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  executeQueuedBillsPayOrder,
+  queueBillsPayOrderForFulfillment,
+} from "@/lib/billsPay/fulfillment";
 import { readString } from "@/lib/billsPay/utils";
 
 export type NormalizedBillsPayPaymentWebhookEvent = {
@@ -67,10 +71,23 @@ export async function finalizeVerifiedBillsPayPayment(params: {
   }
 
   if (payment.status === "verified" && order.status === "payment_verified") {
+    const fulfillmentResult = await executeQueuedBillsPayOrder({
+      supabaseAdmin,
+      orderId: order.id,
+    }).catch((error) => {
+      console.error(
+        "finalizeVerifiedBillsPayPayment already-verified fulfillment execution error:",
+        error
+      );
+      return null;
+    });
+
     return {
       payment,
       order,
       alreadyVerified: true,
+      queuedForFulfillment: false,
+      fulfillmentTriggered: Boolean(fulfillmentResult?.ok),
     };
   }
 
@@ -145,14 +162,34 @@ export async function finalizeVerifiedBillsPayPayment(params: {
     console.error("finalizeVerifiedBillsPayPayment event insert error:", eventError);
   }
 
+  const queueResult = await queueBillsPayOrderForFulfillment({
+    supabaseAdmin,
+    orderId: order.id,
+    source: "payment_webhook",
+  });
+
+  const fulfillmentResult = await executeQueuedBillsPayOrder({
+    supabaseAdmin,
+    orderId: order.id,
+  }).catch((error) => {
+    console.error(
+      "finalizeVerifiedBillsPayPayment fulfillment execution error:",
+      error
+    );
+    return null;
+  });
+
   return {
     payment,
-    order: {
-      ...order,
-      status: "payment_verified",
-      payment_status: "verified",
-    },
+    order:
+      queueResult.order ?? {
+        ...order,
+        status: "payment_verified",
+        payment_status: "verified",
+      },
     alreadyVerified: false,
+    queuedForFulfillment: !queueResult.alreadyQueued,
+    fulfillmentTriggered: Boolean(fulfillmentResult?.ok),
   };
 }
 

@@ -1,4 +1,5 @@
 import { authenticateBillsPayRequest } from "@/lib/billsPay/auth";
+import { reconcileBillsPayOrderFulfillment } from "@/lib/billsPay/fulfillment";
 import { toCanonicalBillsPayOrderStatus } from "@/lib/billsPay/types";
 import { jsonError, maskReference } from "@/lib/billsPay/utils";
 import { NextResponse } from "next/server";
@@ -15,7 +16,7 @@ export async function GET(
 
     const { id } = await context.params;
 
-    const { data: order, error: orderError } = await auth.supabaseAdmin
+    let { data: order, error: orderError } = await auth.supabaseAdmin
       .from("bills_pay_orders")
       .select(`
         *,
@@ -37,6 +38,42 @@ export async function GET(
 
     if (!order) {
       return jsonError("Bills-pay transaction not found.", 404);
+    }
+
+    if (
+      order.status === "processing_bill_payment" &&
+      ["queued", "in_progress", "unknown"].includes(
+        String(order.fulfillment_status ?? "")
+      )
+    ) {
+      await reconcileBillsPayOrderFulfillment({
+        supabaseAdmin: auth.supabaseAdmin,
+        orderId: order.id,
+      }).catch((error) => {
+        console.error(
+          "GET /api/bills-pay/orders/[id] fulfillment reconciliation error:",
+          error
+        );
+      });
+
+      const refreshedOrder = await auth.supabaseAdmin
+        .from("bills_pay_orders")
+        .select(`
+          *,
+          bills_pay_billers:biller_id (
+            name
+          ),
+          bills_pay_categories:category_id (
+            name
+          )
+        `)
+        .eq("id", order.id)
+        .eq("user_id", auth.user.id)
+        .maybeSingle();
+
+      if (!refreshedOrder.error && refreshedOrder.data) {
+        order = refreshedOrder.data;
+      }
     }
 
     const [paymentsResult, refundsResult, supportCasesResult, eventsResult] =

@@ -46,3 +46,17 @@ export function buildBillsPayPaymentRef(prefix = "BAV-BPAY") {
     .slice(2, 8)
     .toUpperCase()}`;
 }
+
+export function buildBillsPayProviderRequestRef(prefix = "BAV-BFUL") {
+  return `${prefix}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 8)
+    .toUpperCase()}`;
+}
+
+export function buildBillsPayIdempotencyKey(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 10)
+    .toUpperCase()}`;
+}

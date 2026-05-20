@@ -1,7 +1,9 @@
 import type { BillsPayProviderAdapter } from "@/lib/billsPay/providers/base";
 import { manualBillsPayProviderAdapter } from "@/lib/billsPay/providers/manual";
+import { reloadlyBillsPayProviderAdapter } from "@/lib/billsPay/providers/reloadly";
 
 const BILLS_PAY_PROVIDER_ADAPTERS: BillsPayProviderAdapter[] = [
+  reloadlyBillsPayProviderAdapter,
   manualBillsPayProviderAdapter,
 ];
 

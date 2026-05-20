@@ -1,4 +1,8 @@
 import { authenticateBillsPayRequest } from "@/lib/billsPay/auth";
+import {
+  executeQueuedBillsPayOrder,
+  queueBillsPayOrderForFulfillment,
+} from "@/lib/billsPay/fulfillment";
 import { toCanonicalBillsPayOrderStatus } from "@/lib/billsPay/types";
 import { jsonError, readString } from "@/lib/billsPay/utils";
 import { NextResponse } from "next/server";
@@ -141,6 +145,24 @@ export async function POST(
       );
     }
 
+    if (paymentProvider === "manual") {
+      await queueBillsPayOrderForFulfillment({
+        supabaseAdmin: auth.supabaseAdmin,
+        orderId: order.id,
+        source: "manual_confirmation",
+      });
+
+      await executeQueuedBillsPayOrder({
+        supabaseAdmin: auth.supabaseAdmin,
+        orderId: order.id,
+      }).catch((error) => {
+        console.error(
+          "POST /api/bills-pay/orders/[id]/confirm-payment fulfillment execution error:",
+          error
+        );
+      });
+    }
+
     return NextResponse.json({
       order: {
         id: updatedOrder.id,
@@ -158,7 +180,7 @@ export async function POST(
       },
       nextStep:
         paymentProvider === "manual"
-          ? "Manual demo payment marked as verified. Live bill settlement is not wired yet."
+          ? "Manual demo payment marked as verified and queued for bill settlement."
           : "Payment reference received. Backend verification must complete before any bill payment is sent.",
     });
   } catch (error) {
