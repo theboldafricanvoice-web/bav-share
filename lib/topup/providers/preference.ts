@@ -1,4 +1,4 @@
-const TOPUP_PROVIDER_PRIORITY = ["dingconnect", "reloadly", "manual"] as const;
+const TOPUP_PROVIDER_PRIORITY = ["dingconnect", "dtone", "reloadly", "manual"] as const;
 const TOPUP_NETWORK_NOISE_TOKENS = [
   "sierraleone",
   "sierra",

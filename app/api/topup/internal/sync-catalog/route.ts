@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from "@/lib/topup/auth";
 import { syncDingConnectCatalog } from "@/lib/topup/providers/dingconnect";
+import { syncDtOneCatalog } from "@/lib/topup/providers/dtone";
 import { syncReloadlyCatalog } from "@/lib/topup/providers/reloadly";
 import { jsonError, readString } from "@/lib/topup/utils";
 import { NextResponse } from "next/server";
@@ -57,6 +58,20 @@ export async function POST(request: Request) {
     if (providerCode === "dingconnect") {
       const supabaseAdmin = getSupabaseAdmin();
       const result = await syncDingConnectCatalog({
+        supabaseAdmin,
+        countryCodes,
+        activate,
+      });
+
+      return NextResponse.json({
+        ok: true,
+        sync: result,
+      });
+    }
+
+    if (providerCode === "dtone") {
+      const supabaseAdmin = getSupabaseAdmin();
+      const result = await syncDtOneCatalog({
         supabaseAdmin,
         countryCodes,
         activate,
