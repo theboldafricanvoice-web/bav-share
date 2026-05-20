@@ -376,7 +376,10 @@ async function fetchReloadlyBillersByCountry(countryCode: string) {
 
   for (const type of getReloadlyCatalogTypes()) {
     const query = new URLSearchParams({
+      id: "0",
+      name: "0",
       type,
+      serviceType: "0",
       countryISOCode: normalizedCountryCode,
       page: "0",
       size: "200",
@@ -538,7 +541,11 @@ export const reloadlyBillsPayProviderAdapter: BillsPayProviderAdapter = {
 
     for (const type of getReloadlyCatalogTypes()) {
       const query = new URLSearchParams({
+        id: "0",
+        name: "0",
         type,
+        serviceType: "0",
+        countryISOCode: "0",
         page: "0",
         size: "200",
       });
